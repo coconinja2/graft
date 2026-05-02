@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|Bash|NotebookEdit|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "graft hook pre --tool \"$CLAUDE_TOOL_NAME\" --input '$CLAUDE_TOOL_INPUT' --agent \"${GRAFT_AGENT_ID:-$CLAUDE_SESSION_ID}\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|Bash|NotebookEdit|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "graft hook post --tool \"$CLAUDE_TOOL_NAME\" --input '$CLAUDE_TOOL_INPUT' --agent \"${GRAFT_AGENT_ID:-$CLAUDE_SESSION_ID}\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+bus:
+  port: 7433
+  backend: memory          # memory | redis
+  redis_url: redis://localhost:6379  # only if backend: redis
+
+agents:
+  heartbeat_interval: 30   # seconds between heartbeats
+  claim_ttl: 120           # seconds before abandoned claim expires
+
+signal_responses:
+  interface_change:    checkpoint_and_replay
+  security_finding:    escalate_to_human
+  schema_change:       checkpoint_and_replay
+  resource_conflict:   wait_and_retry
+  new_utility:         incremental_adjust
+
+pools:
+  test_database:
+    resources:
+      - postgres://localhost:5432/test_1
+      - postgres://localhost:5432/test_2
+      - postgres://localhost:5432/test_3
+  dev_port:
+    resources: [3001, 3002, 3003, 3004]
+
+waves:
+  sprint_wave_1:
+    agents: [agent-a, agent-b, agent-c, agent-d]
+    merge_gate: all_complete    # all_complete | majority | any
