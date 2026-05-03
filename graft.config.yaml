@@ -7,12 +7,16 @@ agents:
   heartbeat_interval: 30   # seconds between heartbeats
   claim_ttl: 120           # seconds before abandoned claim expires
 
+# Signal response strategies — agent decides by default.
+# Receiving agents read the full broadcast context and choose how to respond
+# based on what they are currently working on. Only configure forced strategies
+# here for signals where agent discretion is not acceptable.
 signal_responses:
-  interface_change:    checkpoint_and_replay
-  security_finding:    escalate_to_human
-  schema_change:       checkpoint_and_replay
-  resource_conflict:   wait_and_retry
-  new_utility:         incremental_adjust
+  security_finding: escalate_to_human   # hard floor — never leave to agent judgment
+
+# All other signal types (change_summary, interface_change, schema_change,
+# resource_conflict, new_utility) are delivered as context. No forced strategy.
+# Agents incorporate changes that affect their work and ignore those that don't.
 
 pools:
   test_database:

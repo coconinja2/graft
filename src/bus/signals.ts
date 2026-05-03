@@ -8,6 +8,13 @@ export interface Signal {
   message: string
   affectedResources?: string[]
   severity?: 'low' | 'medium' | 'high' | 'critical'
+  // Richer context for change_summary signals — receiving agent uses this to decide how to respond
+  changeContext?: {
+    what: string        // what was changed ("rewrote login to pass JWT token instead of cookie")
+    why?: string        // why it was changed ("session cookies blocked by Safari ITP")
+    breakingChange: boolean
+    diff?: string       // optional short diff excerpt
+  }
   ts: number
 }
 
@@ -23,6 +30,7 @@ export interface PublishRequest {
   message: string
   affectedResources?: string[]
   severity?: 'low' | 'medium' | 'high' | 'critical'
+  changeContext?: Signal['changeContext']
 }
 
 export class SignalBus {
@@ -55,6 +63,7 @@ export class SignalBus {
       message: req.message,
       affectedResources: req.affectedResources,
       severity: req.severity,
+      changeContext: req.changeContext,
       ts: Date.now(),
     }
 

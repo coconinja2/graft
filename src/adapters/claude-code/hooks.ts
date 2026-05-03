@@ -78,11 +78,23 @@ export async function handlePreToolUse(input: PreHookInput): Promise<PreHookOutp
   try {
     const signals = await client.getPendingSignals()
     if (signals.length > 0) {
+      const formatted = signals.map(s => {
+        const lines: string[] = [`  [${s.type}] from ${s.from}: ${s.message}`]
+        if (s.affectedResources?.length) {
+          lines.push(`    affected: ${s.affectedResources.join(', ')}`)
+        }
+        if (s.changeContext) {
+          lines.push(`    what: ${s.changeContext.what}`)
+          if (s.changeContext.why) lines.push(`    why: ${s.changeContext.why}`)
+          if (s.changeContext.breakingChange) lines.push(`    breaking: yes`)
+          if (s.changeContext.diff) lines.push(`    diff:\n${s.changeContext.diff.split('\n').map(l => `      ${l}`).join('\n')}`)
+        }
+        return lines.join('\n')
+      })
       signalContext =
-        '\n\nPending signals from Graft bus:\n' +
-        signals
-          .map(s => `  [${s.type}] from ${s.from}: ${s.message}`)
-          .join('\n')
+        '\n\nChanges broadcast by other agents — review and decide how to proceed:\n' +
+        formatted.join('\n') +
+        '\n\nIf any of these changes affect what you are currently working on, incorporate them before continuing. If they are unrelated to your current task, continue as planned.'
     }
   } catch {
     // Bus unreachable — fail open
@@ -128,12 +140,19 @@ export async function handlePreToolUse(input: PreHookInput): Promise<PreHookOutp
 export interface PostHookInput {
   toolName: string
   toolInput: Record<string, unknown>
+  toolOutput?: Record<string, unknown>
   agentId: string
   busUrl?: string
+  // Optional: agent-provided summary of what changed and why, for change_summary broadcast
+  changeSummary?: {
+    what: string
+    why?: string
+    breakingChange?: boolean
+  }
 }
 
 export async function handlePostToolUse(input: PostHookInput): Promise<void> {
-  const { toolName, toolInput, agentId, busUrl } = input
+  const { toolName, toolInput, toolOutput, agentId, busUrl, changeSummary } = input
   const client = new GraftClient({ busUrl, agentId })
 
   const resourceId = extractResource(toolName, toolInput)
@@ -144,6 +163,22 @@ export async function handlePostToolUse(input: PostHookInput): Promise<void> {
       await client.release(resourceId)
     } else if (WRITE_TOOLS.has(toolName)) {
       await client.heartbeat(resourceId)
+
+      // Broadcast what changed so other agents can decide how to respond.
+      // Uses agent-provided summary when available; falls back to a minimal signal.
+      const what = changeSummary?.what ?? `${toolName} on ${resourceId}`
+      await client.publish({
+        type: 'change_summary',
+        message: what,
+        affectedResources: [resourceId],
+        severity: changeSummary?.breakingChange ? 'high' : 'low',
+        changeContext: {
+          what,
+          why: changeSummary?.why,
+          breakingChange: changeSummary?.breakingChange ?? false,
+          diff: toolOutput?.patch as string | undefined,
+        },
+      }).catch(() => { /* fail open */ })
     }
   } catch {
     // Bus unreachable — fail open

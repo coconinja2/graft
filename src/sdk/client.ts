@@ -91,11 +91,19 @@ export interface ClaimOptions {
   claimType?: 'write' | 'read'
 }
 
+export interface ChangeContext {
+  what: string
+  why?: string
+  breakingChange: boolean
+  diff?: string
+}
+
 export interface PublishOptions {
   type: string
   message: string
   affectedResources?: string[]
   severity?: 'low' | 'medium' | 'high' | 'critical'
+  changeContext?: ChangeContext
 }
 
 export interface AuditFilter {
@@ -180,6 +188,7 @@ export class GraftClient {
       message: options.message,
       affected_resources: options.affectedResources,
       severity: options.severity,
+      change_context: options.changeContext,
     })
   }
 
