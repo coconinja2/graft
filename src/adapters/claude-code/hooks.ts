@@ -10,6 +10,7 @@
 
 import * as path from 'path'
 import { GraftClient } from '../../sdk/client'
+import type { ChangeSummaryPayload } from '../../bus/signals'
 
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'Bash', 'NotebookEdit'])
 
@@ -140,47 +141,56 @@ export async function handlePreToolUse(input: PreHookInput): Promise<PreHookOutp
 export interface PostHookInput {
   toolName: string
   toolInput: Record<string, unknown>
-  toolOutput?: Record<string, unknown>
   agentId: string
   busUrl?: string
-  // Optional: agent-provided summary of what changed and why, for change_summary broadcast
-  changeSummary?: {
-    what: string
-    why?: string
-    breakingChange?: boolean
-  }
+  // Required for write tools. No fallback — agents must describe what they changed.
+  changeSummary?: ChangeSummaryPayload
 }
 
-export async function handlePostToolUse(input: PostHookInput): Promise<void> {
-  const { toolName, toolInput, toolOutput, agentId, busUrl, changeSummary } = input
+export interface PostHookOutput {
+  broadcasted: boolean
+  warning?: string
+}
+
+export async function handlePostToolUse(input: PostHookInput): Promise<PostHookOutput> {
+  const { toolName, toolInput, agentId, busUrl, changeSummary } = input
   const client = new GraftClient({ busUrl, agentId })
 
   const resourceId = extractResource(toolName, toolInput)
-  if (!resourceId) return
+  if (!resourceId) return { broadcasted: false }
 
   try {
     if (READ_TOOLS.has(toolName)) {
       await client.release(resourceId)
-    } else if (WRITE_TOOLS.has(toolName)) {
+      return { broadcasted: false }
+    }
+
+    if (WRITE_TOOLS.has(toolName)) {
       await client.heartbeat(resourceId)
 
-      // Broadcast what changed so other agents can decide how to respond.
-      // Uses agent-provided summary when available; falls back to a minimal signal.
-      const what = changeSummary?.what ?? `${toolName} on ${resourceId}`
+      if (!changeSummary) {
+        return {
+          broadcasted: false,
+          warning:
+            `Graft: change_summary not broadcast for ${resourceId}. ` +
+            `Provide changeSummary (what, why, breakingChange, affectedResources) ` +
+            `so other agents can decide how to respond.`,
+        }
+      }
+
       await client.publish({
         type: 'change_summary',
-        message: what,
-        affectedResources: [resourceId],
-        severity: changeSummary?.breakingChange ? 'high' : 'low',
-        changeContext: {
-          what,
-          why: changeSummary?.why,
-          breakingChange: changeSummary?.breakingChange ?? false,
-          diff: toolOutput?.patch as string | undefined,
-        },
-      }).catch(() => { /* fail open */ })
+        message: changeSummary.what,
+        affectedResources: changeSummary.affectedResources,
+        severity: changeSummary.breakingChange ? 'high' : 'low',
+        changeContext: changeSummary,
+      }).catch(() => { /* bus unreachable — fail open */ })
+
+      return { broadcasted: true }
     }
   } catch {
     // Bus unreachable — fail open
   }
+
+  return { broadcasted: false }
 }

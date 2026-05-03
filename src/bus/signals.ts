@@ -1,6 +1,17 @@
 import { randomUUID } from 'crypto'
 import { AuditLog } from './audit'
 
+// Required payload when broadcasting a change_summary signal.
+// Every field except diff is mandatory — receiving agents need this to make
+// an informed decision about whether the change affects their work.
+export interface ChangeSummaryPayload {
+  what: string          // what changed ("rewrote login to return JWT token instead of setting a cookie")
+  why: string           // why it changed ("Safari ITP blocks third-party cookies in our auth flow")
+  breakingChange: boolean
+  affectedResources: string[]   // file paths or resource IDs touched
+  diff?: string         // optional short diff excerpt
+}
+
 export interface Signal {
   signalId: string
   type: string
@@ -8,13 +19,7 @@ export interface Signal {
   message: string
   affectedResources?: string[]
   severity?: 'low' | 'medium' | 'high' | 'critical'
-  // Richer context for change_summary signals — receiving agent uses this to decide how to respond
-  changeContext?: {
-    what: string        // what was changed ("rewrote login to pass JWT token instead of cookie")
-    why?: string        // why it was changed ("session cookies blocked by Safari ITP")
-    breakingChange: boolean
-    diff?: string       // optional short diff excerpt
-  }
+  changeContext?: ChangeSummaryPayload
   ts: number
 }
 
@@ -30,7 +35,7 @@ export interface PublishRequest {
   message: string
   affectedResources?: string[]
   severity?: 'low' | 'medium' | 'high' | 'critical'
-  changeContext?: Signal['changeContext']
+  changeContext?: ChangeSummaryPayload
 }
 
 export class SignalBus {

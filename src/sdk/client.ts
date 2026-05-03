@@ -91,19 +91,17 @@ export interface ClaimOptions {
   claimType?: 'write' | 'read'
 }
 
-export interface ChangeContext {
-  what: string
-  why?: string
-  breakingChange: boolean
-  diff?: string
-}
+// Re-export so consumers import the canonical interface from the SDK
+export type { ChangeSummaryPayload } from '../bus/signals'
+import type { ChangeSummaryPayload } from '../bus/signals'
 
 export interface PublishOptions {
   type: string
   message: string
   affectedResources?: string[]
   severity?: 'low' | 'medium' | 'high' | 'critical'
-  changeContext?: ChangeContext
+  // Required when type === 'change_summary'. All fields enforced — no fallback.
+  changeContext?: ChangeSummaryPayload
 }
 
 export interface AuditFilter {
