@@ -149,3 +149,99 @@ describe('Health endpoint', () => {
     expect(health.uptime).toBeGreaterThanOrEqual(0)
   })
 })
+
+describe('change_summary broadcast flow', () => {
+  test('agent-b receives full changeContext after agent-a broadcasts', async () => {
+    const a = new GraftClient({ busUrl: baseUrl, agentId: 'cs-agent-a' })
+    const b = new GraftClient({ busUrl: baseUrl, agentId: 'cs-agent-b' })
+
+    await b.subscribe(['change_summary'])
+
+    await a.publish({
+      type: 'change_summary',
+      message: 'login now returns JWT token instead of setting a cookie',
+      affectedResources: ['src/auth/login.ts', 'src/auth/types.ts'],
+      severity: 'high',
+      changeContext: {
+        what: 'login now returns JWT token instead of setting a cookie',
+        why: 'Safari ITP blocks third-party cookies',
+        breakingChange: true,
+        affectedResources: ['src/auth/login.ts', 'src/auth/types.ts'],
+      },
+    })
+
+    const signals = await b.getPendingSignals()
+    expect(signals.length).toBe(1)
+    expect(signals[0].type).toBe('change_summary')
+    expect(signals[0].changeContext?.breakingChange).toBe(true)
+    expect(signals[0].changeContext?.why).toBe('Safari ITP blocks third-party cookies')
+    expect(signals[0].changeContext?.affectedResources).toContain('src/auth/login.ts')
+  })
+
+  test('agent-b can decide to ignore a change_summary that does not affect its work', async () => {
+    const a = new GraftClient({ busUrl: baseUrl, agentId: 'cs2-agent-a' })
+    const b = new GraftClient({ busUrl: baseUrl, agentId: 'cs2-agent-b' })
+
+    await b.subscribe(['change_summary'])
+
+    await a.publish({
+      type: 'change_summary',
+      message: 'refactored CSS variables in theme.ts',
+      affectedResources: ['src/ui/theme.ts'],
+      severity: 'low',
+      changeContext: {
+        what: 'refactored CSS variables in theme.ts',
+        why: 'consolidate design tokens',
+        breakingChange: false,
+        affectedResources: ['src/ui/theme.ts'],
+      },
+    })
+
+    const signals = await b.getPendingSignals()
+    expect(signals.length).toBe(1)
+    // Agent B (working on auth) reads this and decides it is unrelated — no assertion
+    // on behaviour since the decision lives in the agent, not the bus. The signal
+    // is delivered; what the agent does with it is out of scope for this test.
+    expect(signals[0].changeContext?.breakingChange).toBe(false)
+  })
+
+  test('sender does not receive their own change_summary', async () => {
+    const a = new GraftClient({ busUrl: baseUrl, agentId: 'cs3-agent-a' })
+    await a.subscribe(['change_summary'])
+    await a.publish({
+      type: 'change_summary',
+      message: 'some change',
+      changeContext: {
+        what: 'some change',
+        why: 'some reason',
+        breakingChange: false,
+        affectedResources: ['src/foo.ts'],
+      },
+    })
+    const signals = await a.getPendingSignals()
+    expect(signals.length).toBe(0)
+  })
+
+  test('change_summary appears in signal history after delivery', async () => {
+    const a = new GraftClient({ busUrl: baseUrl, agentId: 'cs4-agent-a' })
+    const b = new GraftClient({ busUrl: baseUrl, agentId: 'cs4-agent-b' })
+
+    await b.subscribe(['change_summary'])
+    await a.publish({
+      type: 'change_summary',
+      message: 'rewrote session handler',
+      changeContext: {
+        what: 'rewrote session handler',
+        why: 'reduce latency',
+        breakingChange: false,
+        affectedResources: ['src/session/handler.ts'],
+      },
+    })
+
+    await b.getPendingSignals()
+
+    const history = await a.getSignalHistory({ from: 'cs4-agent-a' })
+    expect(history.length).toBeGreaterThanOrEqual(1)
+    expect(history[0].status).toBe('delivered')
+  })
+})

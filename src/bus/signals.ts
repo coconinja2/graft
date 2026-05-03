@@ -38,10 +38,13 @@ export interface PublishRequest {
   changeContext?: ChangeSummaryPayload
 }
 
+const HISTORY_CAP = 10_000
+
 export class SignalBus {
   private queues: Map<string, Signal[]> = new Map()
   private subscriptions: Map<string, Set<string>> = new Map()
   private history: SignalHistoryEntry[] = []
+  private historyIndex: Map<string, SignalHistoryEntry> = new Map()
   private audit: AuditLog
 
   constructor(audit: AuditLog) {
@@ -81,7 +84,13 @@ export class SignalBus {
       if (agentId === req.from) continue
       if (types.has(req.type) || types.has('*')) {
         this.queues.get(agentId)!.push(signal)
-        this.history.push({ ...signal, status: 'pending' })
+        const entry: SignalHistoryEntry = { ...signal, status: 'pending' }
+        this.historyIndex.set(signal.signalId, entry)
+        this.history.push(entry)
+        if (this.history.length > HISTORY_CAP) {
+          const dropped = this.history.shift()!
+          this.historyIndex.delete(dropped.signalId)
+        }
       }
     }
 
@@ -94,11 +103,8 @@ export class SignalBus {
     const now = Date.now()
 
     for (const signal of pending) {
-      // Mark first matching pending history entry as delivered
-      const entry = [...this.history].reverse().find(
-        (h: SignalHistoryEntry) => h.signalId === signal.signalId && h.status === 'pending'
-      )
-      if (entry) {
+      const entry = this.historyIndex.get(signal.signalId)
+      if (entry && entry.status === 'pending') {
         entry.status = 'delivered'
         entry.deliveredTo = agentId
         entry.deliveredAt = now

@@ -25,6 +25,7 @@ export interface Signal {
   message: string
   affectedResources?: string[]
   severity?: 'low' | 'medium' | 'high' | 'critical'
+  changeContext?: ChangeSummaryPayload
   ts: number
 }
 
@@ -91,9 +92,8 @@ export interface ClaimOptions {
   claimType?: 'write' | 'read'
 }
 
-// Re-export so consumers import the canonical interface from the SDK
-export type { ChangeSummaryPayload } from '../bus/signals'
 import type { ChangeSummaryPayload } from '../bus/signals'
+export type { ChangeSummaryPayload }
 
 export interface PublishOptions {
   type: string

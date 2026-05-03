@@ -143,7 +143,6 @@ export interface PostHookInput {
   toolInput: Record<string, unknown>
   agentId: string
   busUrl?: string
-  // Required for write tools. No fallback — agents must describe what they changed.
   changeSummary?: ChangeSummaryPayload
 }
 
@@ -166,9 +165,8 @@ export async function handlePostToolUse(input: PostHookInput): Promise<PostHookO
     }
 
     if (WRITE_TOOLS.has(toolName)) {
-      await client.heartbeat(resourceId)
-
       if (!changeSummary) {
+        await client.heartbeat(resourceId).catch(() => {})
         return {
           broadcasted: false,
           warning:
@@ -178,13 +176,16 @@ export async function handlePostToolUse(input: PostHookInput): Promise<PostHookO
         }
       }
 
-      await client.publish({
-        type: 'change_summary',
-        message: changeSummary.what,
-        affectedResources: changeSummary.affectedResources,
-        severity: changeSummary.breakingChange ? 'high' : 'low',
-        changeContext: changeSummary,
-      }).catch(() => { /* bus unreachable — fail open */ })
+      await Promise.all([
+        client.heartbeat(resourceId).catch(() => {}),
+        client.publish({
+          type: 'change_summary',
+          message: changeSummary.what,
+          affectedResources: changeSummary.affectedResources,
+          severity: changeSummary.breakingChange ? 'high' : 'low',
+          changeContext: changeSummary,
+        }).catch(() => {}),
+      ])
 
       return { broadcasted: true }
     }
