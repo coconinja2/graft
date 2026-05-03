@@ -150,6 +150,63 @@ describe('Health endpoint', () => {
   })
 })
 
+describe('waitForRelease', () => {
+  test('returns immediately when resource is not held', async () => {
+    const a = new GraftClient({ busUrl: baseUrl, agentId: 'wait-free-a' })
+    const start = Date.now()
+    await a.waitForRelease('src/never-claimed.ts')
+    expect(Date.now() - start).toBeLessThan(500)
+  })
+
+  test('blocks until holder releases then returns', async () => {
+    const holder = new GraftClient({ busUrl: baseUrl, agentId: 'wait-holder' })
+    const waiter = new GraftClient({ busUrl: baseUrl, agentId: 'wait-waiter' })
+
+    await holder.claim({ resourceId: 'src/wait-test.ts', intent: 'holding' })
+
+    let released = false
+    const waitPromise = waiter.waitForRelease('src/wait-test.ts').then(() => { released = true })
+
+    // Give the wait request time to park on the server
+    await new Promise(r => setTimeout(r, 100))
+    expect(released).toBe(false)
+
+    await holder.release('src/wait-test.ts')
+    await waitPromise
+    expect(released).toBe(true)
+  })
+
+  test('waiter can immediately claim after waitForRelease resolves', async () => {
+    const holder = new GraftClient({ busUrl: baseUrl, agentId: 'wait-claim-holder' })
+    const waiter = new GraftClient({ busUrl: baseUrl, agentId: 'wait-claim-waiter' })
+
+    await holder.claim({ resourceId: 'src/wait-claim-test.ts', intent: 'holding' })
+
+    const waitAndClaim = waiter.waitForRelease('src/wait-claim-test.ts').then(() =>
+      waiter.claim({ resourceId: 'src/wait-claim-test.ts', intent: 'acquired after wait' })
+    )
+
+    await new Promise(r => setTimeout(r, 100))
+    await holder.release('src/wait-claim-test.ts')
+
+    const result = await waitAndClaim
+    expect(result.granted).toBe(true)
+  })
+
+  test('times out with 408 when resource is not released within timeout_ms', async () => {
+    const holder = new GraftClient({ busUrl: baseUrl, agentId: 'timeout-holder' })
+    const waiter = new GraftClient({ busUrl: baseUrl, agentId: 'timeout-waiter' })
+
+    await holder.claim({ resourceId: 'src/timeout-test.ts', intent: 'holding forever' })
+
+    await expect(
+      waiter.waitForRelease('src/timeout-test.ts', 200)
+    ).rejects.toThrow()
+
+    await holder.release('src/timeout-test.ts')
+  })
+})
+
 describe('change_summary broadcast flow', () => {
   test('agent-b receives full changeContext after agent-a broadcasts', async () => {
     const a = new GraftClient({ busUrl: baseUrl, agentId: 'cs-agent-a' })
@@ -240,7 +297,8 @@ describe('change_summary broadcast flow', () => {
 
     await b.getPendingSignals()
 
-    const history = await a.getSignalHistory({ from: 'cs4-agent-a' })
+    // Query from receiver's perspective — history is indexed by deliveredTo agent
+    const history = await b.getSignalHistory({ from: 'cs4-agent-a' })
     expect(history.length).toBeGreaterThanOrEqual(1)
     expect(history[0].status).toBe('delivered')
   })

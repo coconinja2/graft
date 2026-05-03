@@ -33,6 +33,14 @@ class ClaimResult(BaseModel):
     conflictId: Optional[str] = None
 
 
+class ChangeSummaryPayload(BaseModel):
+    what: str
+    why: str
+    breakingChange: bool
+    affectedResources: list[str]
+    diff: Optional[str] = None
+
+
 class Signal(BaseModel):
     signalId: str
     type: str
@@ -40,6 +48,7 @@ class Signal(BaseModel):
     message: str
     affectedResources: Optional[list[str]] = None
     severity: Optional[str] = None
+    changeContext: Optional[ChangeSummaryPayload] = None
     ts: int
 
     class Config:
@@ -103,8 +112,8 @@ class GraftClient:
         self.agent_id = agent_id
         self._client = httpx.Client(base_url=self.bus_url, timeout=30.0)
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        resp = self._client.request(method, path, **kwargs)
+    def _request(self, method: str, path: str, timeout: Optional[float] = None, **kwargs: Any) -> Any:
+        resp = self._client.request(method, path, timeout=timeout or self._client.timeout, **kwargs)
         resp.raise_for_status()
         return resp.json()
 
@@ -135,6 +144,15 @@ class GraftClient:
         except httpx.HTTPError:
             return False
 
+    def wait_for_release(self, resource_id: str, timeout_ms: int = 30_000) -> None:
+        """Blocks until resource_id is released or timeout_ms elapses."""
+        self._request(
+            "GET",
+            f"/claims/{resource_id}/wait",
+            params={"timeout_ms": timeout_ms},
+            timeout=timeout_ms / 1000 + 5,
+        )
+
     def list_claims(self) -> list[Claim]:
         return [Claim(**c) for c in self._request("GET", "/claims")]
 
@@ -153,6 +171,7 @@ class GraftClient:
         message: str,
         affected_resources: Optional[list[str]] = None,
         severity: Optional[str] = None,
+        change_context: Optional[ChangeSummaryPayload] = None,
     ) -> Signal:
         data = self._request("POST", "/signals", json={
             "type": type,
@@ -160,6 +179,7 @@ class GraftClient:
             "message": message,
             "affected_resources": affected_resources,
             "severity": severity,
+            "change_context": change_context.model_dump() if change_context else None,
         })
         return Signal(**data)
 

@@ -28,6 +28,7 @@ export interface ClaimResult {
 
 export class ClaimRegistry {
   private claims: Map<string, Claim> = new Map()
+  private waiters: Map<string, Array<() => void>> = new Map()
   private audit: AuditLog
   private defaultTtl: number
   private cleanupTimer: NodeJS.Timeout
@@ -99,6 +100,7 @@ export class ClaimRegistry {
       resourceId,
       detail: { intent: existing.intent },
     })
+    this.notifyWaiters(resourceId)
     return true
   }
 
@@ -111,7 +113,27 @@ export class ClaimRegistry {
       resourceId,
       detail: { intent: existing.intent, forced: true },
     })
+    this.notifyWaiters(resourceId)
     return true
+  }
+
+  // Register a callback fired exactly once when resourceId is released or expires.
+  // Returns a cleanup function to cancel the registration (used by timeout paths).
+  addWaiter(resourceId: string, cb: () => void): () => void {
+    if (!this.waiters.has(resourceId)) this.waiters.set(resourceId, [])
+    const list = this.waiters.get(resourceId)!
+    list.push(cb)
+    return () => {
+      const i = list.indexOf(cb)
+      if (i !== -1) list.splice(i, 1)
+    }
+  }
+
+  private notifyWaiters(resourceId: string): void {
+    const cbs = this.waiters.get(resourceId)
+    if (!cbs?.length) return
+    this.waiters.delete(resourceId)
+    for (const cb of cbs) cb()
   }
 
   heartbeat(resourceId: string, agentId: string): boolean {
@@ -144,6 +166,7 @@ export class ClaimRegistry {
           resourceId,
           detail: { intent: claim.intent, ttl: claim.ttl },
         })
+        this.notifyWaiters(resourceId)
       }
     }
   }

@@ -1,0 +1,146 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ClaimRegistry = void 0;
+class ClaimRegistry {
+    constructor(audit, defaultTtl = 120) {
+        this.claims = new Map();
+        this.waiters = new Map();
+        this.audit = audit;
+        this.defaultTtl = defaultTtl;
+        this.cleanupTimer = setInterval(() => this.cleanup(), 10000);
+        this.cleanupTimer.unref();
+    }
+    claim(req) {
+        const existing = this.claims.get(req.resourceId);
+        const now = Date.now();
+        if (existing && existing.claimType === 'write' && existing.expiresAt > now && existing.agentId !== req.agentId) {
+            const conflict = this.audit.recordConflict({
+                resourceId: req.resourceId,
+                requestingAgent: { agentId: req.agentId, intent: req.intent },
+                holdingAgent: {
+                    agentId: existing.agentId,
+                    intent: existing.intent,
+                    claimedAt: existing.claimedAt,
+                    ttl: existing.ttl,
+                },
+            });
+            this.audit.append('claim_denied', req.agentId, {
+                resourceId: req.resourceId,
+                conflictId: conflict.conflictId,
+                detail: { holder: existing.agentId, holderIntent: existing.intent },
+            });
+            return {
+                granted: false,
+                holder: {
+                    agentId: existing.agentId,
+                    intent: existing.intent,
+                    claimedAt: existing.claimedAt,
+                    ttl: existing.ttl,
+                },
+                conflictId: conflict.conflictId,
+            };
+        }
+        const ttl = req.ttl ?? this.defaultTtl;
+        const claim = {
+            resourceId: req.resourceId,
+            agentId: req.agentId,
+            intent: req.intent,
+            ttl,
+            claimedAt: now,
+            expiresAt: now + ttl * 1000,
+            lastHeartbeat: now,
+            claimType: req.claimType ?? 'write',
+        };
+        this.claims.set(req.resourceId, claim);
+        this.audit.append('claim_granted', req.agentId, {
+            resourceId: req.resourceId,
+            detail: { intent: req.intent, ttl, claimType: claim.claimType },
+        });
+        return { granted: true, claim };
+    }
+    release(resourceId, agentId) {
+        const existing = this.claims.get(resourceId);
+        if (!existing || existing.agentId !== agentId)
+            return false;
+        this.claims.delete(resourceId);
+        this.audit.resolveConflictsByResource(resourceId, 'holder_released');
+        this.audit.append('claim_released', agentId, {
+            resourceId,
+            detail: { intent: existing.intent },
+        });
+        this.notifyWaiters(resourceId);
+        return true;
+    }
+    forceRelease(resourceId) {
+        const existing = this.claims.get(resourceId);
+        if (!existing)
+            return false;
+        this.claims.delete(resourceId);
+        this.audit.resolveConflictsByResource(resourceId, 'force_released');
+        this.audit.append('claim_released', existing.agentId, {
+            resourceId,
+            detail: { intent: existing.intent, forced: true },
+        });
+        this.notifyWaiters(resourceId);
+        return true;
+    }
+    // Register a callback fired exactly once when resourceId is released or expires.
+    // Returns a cleanup function to cancel the registration (used by timeout paths).
+    addWaiter(resourceId, cb) {
+        if (!this.waiters.has(resourceId))
+            this.waiters.set(resourceId, []);
+        const list = this.waiters.get(resourceId);
+        list.push(cb);
+        return () => {
+            const i = list.indexOf(cb);
+            if (i !== -1)
+                list.splice(i, 1);
+        };
+    }
+    notifyWaiters(resourceId) {
+        const cbs = this.waiters.get(resourceId);
+        if (!cbs?.length)
+            return;
+        this.waiters.delete(resourceId);
+        for (const cb of cbs)
+            cb();
+    }
+    heartbeat(resourceId, agentId) {
+        const claim = this.claims.get(resourceId);
+        if (!claim || claim.agentId !== agentId)
+            return false;
+        const now = Date.now();
+        claim.lastHeartbeat = now;
+        claim.expiresAt = now + claim.ttl * 1000;
+        return true;
+    }
+    get(resourceId) {
+        const claim = this.claims.get(resourceId);
+        if (!claim || claim.expiresAt <= Date.now())
+            return undefined;
+        return claim;
+    }
+    list() {
+        const now = Date.now();
+        return Array.from(this.claims.values()).filter(c => c.expiresAt > now);
+    }
+    cleanup() {
+        const now = Date.now();
+        for (const [resourceId, claim] of this.claims) {
+            if (claim.expiresAt <= now) {
+                this.claims.delete(resourceId);
+                this.audit.resolveConflictsByResource(resourceId, 'holder_expired');
+                this.audit.append('claim_expired', claim.agentId, {
+                    resourceId,
+                    detail: { intent: claim.intent, ttl: claim.ttl },
+                });
+                this.notifyWaiters(resourceId);
+            }
+        }
+    }
+    stop() {
+        clearInterval(this.cleanupTimer);
+    }
+}
+exports.ClaimRegistry = ClaimRegistry;
+//# sourceMappingURL=registry.js.map

@@ -68,18 +68,44 @@ Claims are exclusive by default. Two agents cannot hold the same claim simultane
 An agent publishes a signal when it discovers something that other agents should know about mid-execution. Signals are typed and routed to subscribed agents at their next tool call boundary.
 
 Signal types (user extensible):
+- `change_summary` — agent finished a unit of work and broadcasts what it did; other agents decide how to respond
 - `interface_change` — a shared type or API contract is changing
 - `security_finding` — a vulnerability found in shared code
 - `schema_change` — a database schema or migration is changing
 - `resource_conflict` — an agent hit a resource already in use
 - `new_utility` — a shared utility was created that others might want to use
 
+`change_summary` is the primary broadcast primitive. When an agent completes a write, it **must** broadcast a `change_summary` with a required payload. Receiving agents read the full context and decide for themselves whether to incorporate the change, continue unaffected, or pause. The bus delivers the context — the agent owns the decision.
+
+Required `change_summary` payload (`ChangeSummaryPayload`):
+```typescript
+{
+  what: string           // what changed — specific and semantic, not "updated file"
+  why: string            // why it changed — the constraint or reason behind the decision
+  breakingChange: boolean
+  affectedResources: string[]  // all file paths or resource IDs touched
+  diff?: string          // optional short diff excerpt
+}
+```
+
+If the agent does not provide this payload, the hook logs a warning and skips the broadcast. No auto-generated fallback — a vague signal is worse than no signal because it consumes receiving agents' attention without giving them enough context to act.
+
 ### Signal Response Strategy
-Users configure how each agent responds to each signal type. Strategies:
-- `incremental_adjust` — agent absorbs signal and continues forward with new context
-- `checkpoint_and_replay` — agent saves state, restarts context with signal incorporated
-- `wait_and_retry` — agent pauses, holds claims, waits for signaling agent to complete
+
+**Default model: agent decides.**
+The bus delivers the full signal payload to each receiving agent at its next `preToolUse` boundary. The agent reads the broadcast context — what changed, which resources were affected, the publishing agent's intent — and decides how to respond based on what it is currently working on. A receiving agent working on an unrelated area continues. One whose work overlaps incorporates the change or pauses. No config required for this to work.
+
+**Config as a hard floor for critical signals only.**
+Users can configure forced strategies for signal types where agent discretion is not acceptable:
 - `escalate_to_human` — agent stops, writes pause report, releases claims, halts
+
+The only recommended hard floor is `security_finding: escalate_to_human`. All other signal types should be left to agent judgment.
+
+Strategies (for hard floors only):
+- `escalate_to_human` — agent stops, writes pause report, releases claims, halts
+- `checkpoint_and_replay` — agent saves state, restarts context with signal incorporated (use sparingly)
+- `wait_and_retry` — agent pauses, holds claims, waits for signaling agent to complete (use sparingly)
+- `incremental_adjust` — explicit no-op override: absorb and continue (suppress even the default agent-decides prompt)
 
 ### Resource Pool
 For stateful resources (test databases, dev servers, ports) that can't be shared but have multiple available instances. Agents acquire from the pool, use exclusively, release back.

@@ -154,6 +154,15 @@ export class GraftClient {
     return res.released
   }
 
+  // Blocks until resourceId is released or timeout_ms elapses (default 30s).
+  // Returns immediately if resource is already free.
+  async waitForRelease(resourceId: string, timeoutMs = 30_000): Promise<void> {
+    await this.request(
+      'GET',
+      `/claims/${encodeURIComponent(resourceId)}/wait?timeout_ms=${timeoutMs}`
+    )
+  }
+
   async heartbeat(resourceId: string): Promise<boolean> {
     try {
       await this.request('POST', `/claims/${encodeURIComponent(resourceId)}/heartbeat`, {

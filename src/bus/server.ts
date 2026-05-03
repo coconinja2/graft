@@ -127,6 +127,29 @@ export async function createServer(configPath?: string) {
     return registry.get(decodeURIComponent(req.params.resource_id)) ?? null
   })
 
+  app.get<{ Params: { resource_id: string }; Querystring: { timeout_ms?: string } }>(
+    '/claims/:resource_id/wait',
+    async (req, reply) => {
+      const resourceId = decodeURIComponent(req.params.resource_id)
+      const timeoutMs = Math.min(Number(req.query.timeout_ms ?? 30_000), 300_000)
+
+      if (!registry.get(resourceId)) {
+        return { released: true, resourceId }
+      }
+
+      return new Promise<{ released: boolean; resourceId: string }>((resolve) => {
+        const cancel = registry.addWaiter(resourceId, () => {
+          clearTimeout(timer)
+          resolve({ released: true, resourceId })
+        })
+        const timer = setTimeout(() => {
+          cancel()
+          reply.code(408).send({ error: 'timeout waiting for release', resourceId })
+        }, timeoutMs)
+      })
+    }
+  )
+
   app.post<{ Params: { resource_id: string }; Body: { agent_id: string } }>(
     '/claims/:resource_id/heartbeat',
     async (req, reply) => {
@@ -138,14 +161,14 @@ export async function createServer(configPath?: string) {
 
   // ── Signals ───────────────────────────────────────────────────────────────
 
-  app.post<{ Body: { type: string; from: string; message: string; affected_resources?: string[]; severity?: 'low' | 'medium' | 'high' | 'critical' } }>(
+  app.post<{ Body: { type: string; from: string; message: string; affected_resources?: string[]; severity?: 'low' | 'medium' | 'high' | 'critical'; change_context?: import('./signals').ChangeSummaryPayload } }>(
     '/signals',
     async (req, reply) => {
-      const { type, from, message, affected_resources, severity } = req.body
+      const { type, from, message, affected_resources, severity, change_context } = req.body
       if (!type || !from || !message) {
         return reply.code(400).send({ error: 'type, from, and message are required' })
       }
-      return signals.publish({ type, from, message, affectedResources: affected_resources, severity })
+      return signals.publish({ type, from, message, affectedResources: affected_resources, severity, changeContext: change_context })
     }
   )
 
