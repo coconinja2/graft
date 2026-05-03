@@ -124,6 +124,91 @@ describe('ClaimRegistry', () => {
   })
 })
 
+describe('ClaimRegistry — dead agent detection', () => {
+  test('forceReleaseAgent releases all claims held by that agent', () => {
+    const { registry } = makeRegistry()
+    registry.claim({ resourceId: 'a.ts', agentId: 'agent-a', intent: 'one' })
+    registry.claim({ resourceId: 'b.ts', agentId: 'agent-a', intent: 'two' })
+    registry.claim({ resourceId: 'c.ts', agentId: 'agent-b', intent: 'other' })
+
+    const released = registry.forceReleaseAgent('agent-a')
+    expect(released).toEqual(expect.arrayContaining(['a.ts', 'b.ts']))
+    expect(released).not.toContain('c.ts')
+    expect(registry.get('a.ts')).toBeUndefined()
+    expect(registry.get('b.ts')).toBeUndefined()
+    expect(registry.get('c.ts')).toBeDefined()
+    registry.stop()
+  })
+
+  test('forceReleaseAgent notifies waiters for each released resource', (done) => {
+    const { registry } = makeRegistry()
+    registry.claim({ resourceId: 'a.ts', agentId: 'agent-a', intent: 'one' })
+    registry.claim({ resourceId: 'b.ts', agentId: 'agent-a', intent: 'two' })
+
+    let notified = 0
+    const check = () => { if (++notified === 2) { registry.stop(); done() } }
+    registry.addWaiter('a.ts', check)
+    registry.addWaiter('b.ts', check)
+
+    registry.forceReleaseAgent('agent-a')
+  })
+
+  test('forceReleaseAgent writes claim_released audit entries with agent_dead reason', () => {
+    const { registry, audit } = makeRegistry()
+    registry.claim({ resourceId: 'a.ts', agentId: 'agent-a', intent: 'test' })
+    registry.forceReleaseAgent('agent-a')
+
+    const entries = audit.query({ type: 'claim_released', agentId: 'agent-a' })
+    expect(entries.length).toBeGreaterThanOrEqual(1)
+    expect(entries[0].detail).toMatchObject({ forced: true, reason: 'agent_dead' })
+    registry.stop()
+  })
+
+  test('forceReleaseAgent returns empty array when agent has no claims', () => {
+    const { registry } = makeRegistry()
+    expect(registry.forceReleaseAgent('ghost-agent')).toEqual([])
+    registry.stop()
+  })
+
+  test('dead agent claims are auto-released after deadAgentTimeout', (done) => {
+    jest.useFakeTimers()
+    // deadAgentTimeout = 1s for this test
+    const audit = new AuditLog()
+    const registry = new ClaimRegistry(audit, 120, 1)
+
+    registry.claim({ resourceId: 'auth.ts', agentId: 'agent-a', intent: 'test' })
+
+    registry.addWaiter('auth.ts', () => {
+      expect(registry.get('auth.ts')).toBeUndefined()
+      registry.stop()
+      jest.useRealTimers()
+      done()
+    })
+
+    // Advance past deadAgentTimeout + cleanup interval
+    jest.advanceTimersByTime(12_000)
+  })
+
+  test('agent with active heartbeats is not considered dead', () => {
+    jest.useFakeTimers()
+    const audit = new AuditLog()
+    const registry = new ClaimRegistry(audit, 120, 1)
+
+    registry.claim({ resourceId: 'auth.ts', agentId: 'agent-a', intent: 'test' })
+
+    // Simulate agent sending heartbeats — advances time but keeps touching
+    for (let i = 0; i < 5; i++) {
+      jest.advanceTimersByTime(500)
+      registry.heartbeat('auth.ts', 'agent-a')
+    }
+
+    // Only 2.5s passed total, agent kept heartbeating — claim should still be held
+    expect(registry.get('auth.ts')).toBeDefined()
+    registry.stop()
+    jest.useRealTimers()
+  })
+})
+
 describe('ClaimRegistry — waiters', () => {
   test('addWaiter callback fires immediately when resource is already free', (done) => {
     const { registry } = makeRegistry()

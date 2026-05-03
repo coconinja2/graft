@@ -174,6 +174,10 @@ export class GraftClient {
     }
   }
 
+  async forceReleaseAgent(agentId: string): Promise<{ agentId: string; released: string[]; count: number }> {
+    return this.request('DELETE', `/agents/${encodeURIComponent(agentId)}/claims`)
+  }
+
   async listClaims(): Promise<Claim[]> {
     return this.request('GET', '/claims')
   }

@@ -150,6 +150,46 @@ describe('Health endpoint', () => {
   })
 })
 
+describe('Dead agent — force release', () => {
+  test('forceReleaseAgent releases all claims and returns resource list', async () => {
+    const a = new GraftClient({ busUrl: baseUrl, agentId: 'dead-agent-a' })
+
+    await a.claim({ resourceId: 'src/dead/file1.ts', intent: 'holding 1' })
+    await a.claim({ resourceId: 'src/dead/file2.ts', intent: 'holding 2' })
+
+    const result = await a.forceReleaseAgent('dead-agent-a')
+    expect(result.count).toBe(2)
+    expect(result.released).toEqual(expect.arrayContaining(['src/dead/file1.ts', 'src/dead/file2.ts']))
+  })
+
+  test('waiter unblocks immediately when agent is force-released', async () => {
+    const crashed = new GraftClient({ busUrl: baseUrl, agentId: 'crash-agent' })
+    const waiter = new GraftClient({ busUrl: baseUrl, agentId: 'crash-waiter' })
+    const ops = new GraftClient({ busUrl: baseUrl, agentId: 'crash-ops' })
+
+    await crashed.claim({ resourceId: 'src/crash-test.ts', intent: 'holding before crash' })
+
+    let released = false
+    const waitPromise = waiter.waitForRelease('src/crash-test.ts').then(() => { released = true })
+
+    await new Promise(r => setTimeout(r, 100))
+    expect(released).toBe(false)
+
+    // Simulate operator detecting crash and force-releasing
+    await ops.forceReleaseAgent('crash-agent')
+    await waitPromise
+
+    expect(released).toBe(true)
+  })
+
+  test('forceReleaseAgent on unknown agent returns count 0', async () => {
+    const a = new GraftClient({ busUrl: baseUrl, agentId: 'anyone' })
+    const result = await a.forceReleaseAgent('never-existed-agent')
+    expect(result.count).toBe(0)
+    expect(result.released).toEqual([])
+  })
+})
+
 describe('waitForRelease', () => {
   test('returns immediately when resource is not held', async () => {
     const a = new GraftClient({ busUrl: baseUrl, agentId: 'wait-free-a' })

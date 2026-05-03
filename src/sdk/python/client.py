@@ -144,6 +144,10 @@ class GraftClient:
         except httpx.HTTPError:
             return False
 
+    def force_release_agent(self, agent_id: str) -> dict[str, Any]:
+        """Force-release all claims held by agent_id (e.g. after detecting a crash)."""
+        return self._request("DELETE", f"/agents/{agent_id}/claims")
+
     def wait_for_release(self, resource_id: str, timeout_ms: int = 30_000) -> None:
         """Blocks until resource_id is released or timeout_ms elapses."""
         self._request(

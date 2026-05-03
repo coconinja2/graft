@@ -11,7 +11,7 @@ import { DeadlockDetector } from './deadlock'
 
 interface GraftConfig {
   bus: { port: number; backend: string; audit_max_entries: number; audit_enabled: boolean }
-  agents: { heartbeat_interval: number; claim_ttl: number }
+  agents: { heartbeat_interval: number; claim_ttl: number; dead_agent_timeout: number }
   pools: Record<string, { resources: string[] }>
   waves: Record<string, { agents: string[]; merge_gate: 'all_complete' | 'majority' | 'any' }>
 }
@@ -25,7 +25,7 @@ interface WaveState {
 function loadConfig(configPath?: string): GraftConfig {
   const defaults: GraftConfig = {
     bus: { port: 7433, backend: 'memory', audit_max_entries: 10_000, audit_enabled: true },
-    agents: { heartbeat_interval: 30, claim_ttl: 120 },
+    agents: { heartbeat_interval: 30, claim_ttl: 120, dead_agent_timeout: 30 },
     pools: {},
     waves: {},
   }
@@ -59,7 +59,7 @@ export async function createServer(configPath?: string) {
   const config = loadConfig(configPath)
 
   const audit = new AuditLog(config.bus.audit_max_entries, config.bus.audit_enabled)
-  const registry = new ClaimRegistry(audit, config.agents.claim_ttl)
+  const registry = new ClaimRegistry(audit, config.agents.claim_ttl, config.agents.dead_agent_timeout)
   const signals = new SignalBus(audit)
   const pool = new ResourcePool(audit)
   const deadlock = new DeadlockDetector(audit, registry)
@@ -156,6 +156,17 @@ export async function createServer(configPath?: string) {
       const ok = registry.heartbeat(decodeURIComponent(req.params.resource_id), req.body.agent_id)
       if (!ok) return reply.code(404).send({ error: 'Claim not found or not owned by agent' })
       return { ok }
+    }
+  )
+
+  // ── Agent liveness ───────────────────────────────────────────────────────
+
+  app.delete<{ Params: { agent_id: string } }>(
+    '/agents/:agent_id/claims',
+    async (req) => {
+      const agentId = req.params.agent_id
+      const released = registry.forceReleaseAgent(agentId)
+      return { agentId, released, count: released.length }
     }
   )
 
