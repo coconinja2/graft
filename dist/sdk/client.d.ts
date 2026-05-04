@@ -121,6 +121,11 @@ export declare class GraftClient {
     release(resourceId: string): Promise<boolean>;
     waitForRelease(resourceId: string, timeoutMs?: number): Promise<void>;
     heartbeat(resourceId: string): Promise<boolean>;
+    forceReleaseAgent(agentId: string): Promise<{
+        agentId: string;
+        released: string[];
+        count: number;
+    }>;
     listClaims(): Promise<Claim[]>;
     getClaim(resourceId: string): Promise<Claim | null>;
     subscribe(types: string[]): Promise<void>;

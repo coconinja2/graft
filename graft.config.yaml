@@ -5,8 +5,7 @@ bus:
 
 agents:
   heartbeat_interval: 30   # seconds between heartbeats
-  claim_ttl: 120           # seconds before abandoned claim expires (hard ceiling)
-  dead_agent_timeout: 30   # seconds of silence before an agent is considered dead and its claims force-released
+  claim_ttl: 120           # seconds before an abandoned claim auto-expires (override per claim via ttl param)
 
 # Signal response strategies — agent decides by default.
 # Receiving agents read the full broadcast context and choose how to respond

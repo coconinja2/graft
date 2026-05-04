@@ -114,6 +114,24 @@ class ClaimRegistry {
         claim.expiresAt = now + claim.ttl * 1000;
         return true;
     }
+    // Force-release all claims held by agentId.
+    // Returns the list of resource IDs that were released.
+    forceReleaseAgent(agentId) {
+        const released = [];
+        for (const [resourceId, claim] of this.claims) {
+            if (claim.agentId !== agentId)
+                continue;
+            this.claims.delete(resourceId);
+            this.audit.resolveConflictsByResource(resourceId, 'force_released');
+            this.audit.append('claim_released', agentId, {
+                resourceId,
+                detail: { intent: claim.intent, forced: true, reason: 'agent_dead' },
+            });
+            this.notifyWaiters(resourceId);
+            released.push(resourceId);
+        }
+        return released;
+    }
     get(resourceId) {
         const claim = this.claims.get(resourceId);
         if (!claim || claim.expiresAt <= Date.now())

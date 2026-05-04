@@ -40,6 +40,7 @@ export declare class ClaimRegistry {
     addWaiter(resourceId: string, cb: () => void): () => void;
     private notifyWaiters;
     heartbeat(resourceId: string, agentId: string): boolean;
+    forceReleaseAgent(agentId: string): string[];
     get(resourceId: string): Claim | undefined;
     list(): Claim[];
     private cleanup;

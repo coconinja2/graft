@@ -29,26 +29,18 @@ export interface ClaimResult {
 export class ClaimRegistry {
   private claims: Map<string, Claim> = new Map()
   private waiters: Map<string, Array<() => void>> = new Map()
-  private agentLastSeen: Map<string, number> = new Map()
   private audit: AuditLog
   private defaultTtl: number
-  private deadAgentTimeout: number
   private cleanupTimer: NodeJS.Timeout
 
-  constructor(audit: AuditLog, defaultTtl = 120, deadAgentTimeout = 30) {
+  constructor(audit: AuditLog, defaultTtl = 120) {
     this.audit = audit
     this.defaultTtl = defaultTtl
-    this.deadAgentTimeout = deadAgentTimeout * 1000
     this.cleanupTimer = setInterval(() => this.cleanup(), 10_000)
     this.cleanupTimer.unref()
   }
 
-  private touch(agentId: string): void {
-    this.agentLastSeen.set(agentId, Date.now())
-  }
-
   claim(req: ClaimRequest): ClaimResult {
-    this.touch(req.agentId)
     const existing = this.claims.get(req.resourceId)
     const now = Date.now()
 
@@ -100,7 +92,6 @@ export class ClaimRegistry {
   }
 
   release(resourceId: string, agentId: string): boolean {
-    this.touch(agentId)
     const existing = this.claims.get(resourceId)
     if (!existing || existing.agentId !== agentId) return false
     this.claims.delete(resourceId)
@@ -146,7 +137,6 @@ export class ClaimRegistry {
   }
 
   heartbeat(resourceId: string, agentId: string): boolean {
-    this.touch(agentId)
     const claim = this.claims.get(resourceId)
     if (!claim || claim.agentId !== agentId) return false
     const now = Date.now()
@@ -155,7 +145,7 @@ export class ClaimRegistry {
     return true
   }
 
-  // Force-release all claims held by agentId (e.g. after detecting it is dead).
+  // Force-release all claims held by agentId.
   // Returns the list of resource IDs that were released.
   forceReleaseAgent(agentId: string): string[] {
     const released: string[] = []
@@ -170,7 +160,6 @@ export class ClaimRegistry {
       this.notifyWaiters(resourceId)
       released.push(resourceId)
     }
-    this.agentLastSeen.delete(agentId)
     return released
   }
 
@@ -187,8 +176,6 @@ export class ClaimRegistry {
 
   private cleanup(): void {
     const now = Date.now()
-
-    // TTL expiry
     for (const [resourceId, claim] of this.claims) {
       if (claim.expiresAt <= now) {
         this.claims.delete(resourceId)
@@ -199,23 +186,6 @@ export class ClaimRegistry {
         })
         this.notifyWaiters(resourceId)
       }
-    }
-
-    // Dead agent detection — force-release all claims for agents that have
-    // stopped making any bus calls beyond the deadAgentTimeout window.
-    const deadCutoff = now - this.deadAgentTimeout
-    const deadAgents = new Set<string>()
-    for (const [resourceId, claim] of this.claims) {
-      const lastSeen = this.agentLastSeen.get(claim.agentId) ?? claim.claimedAt
-      if (lastSeen < deadCutoff && !deadAgents.has(claim.agentId)) {
-        deadAgents.add(claim.agentId)
-      }
-    }
-    for (const agentId of deadAgents) {
-      this.audit.append('claim_expired', agentId, {
-        detail: { reason: 'agent_dead', deadAgentTimeout: this.deadAgentTimeout / 1000 },
-      })
-      this.forceReleaseAgent(agentId)
     }
   }
 

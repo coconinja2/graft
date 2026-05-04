@@ -170,43 +170,6 @@ describe('ClaimRegistry — dead agent detection', () => {
     registry.stop()
   })
 
-  test('dead agent claims are auto-released after deadAgentTimeout', (done) => {
-    jest.useFakeTimers()
-    // deadAgentTimeout = 1s for this test
-    const audit = new AuditLog()
-    const registry = new ClaimRegistry(audit, 120, 1)
-
-    registry.claim({ resourceId: 'auth.ts', agentId: 'agent-a', intent: 'test' })
-
-    registry.addWaiter('auth.ts', () => {
-      expect(registry.get('auth.ts')).toBeUndefined()
-      registry.stop()
-      jest.useRealTimers()
-      done()
-    })
-
-    // Advance past deadAgentTimeout + cleanup interval
-    jest.advanceTimersByTime(12_000)
-  })
-
-  test('agent with active heartbeats is not considered dead', () => {
-    jest.useFakeTimers()
-    const audit = new AuditLog()
-    const registry = new ClaimRegistry(audit, 120, 1)
-
-    registry.claim({ resourceId: 'auth.ts', agentId: 'agent-a', intent: 'test' })
-
-    // Simulate agent sending heartbeats — advances time but keeps touching
-    for (let i = 0; i < 5; i++) {
-      jest.advanceTimersByTime(500)
-      registry.heartbeat('auth.ts', 'agent-a')
-    }
-
-    // Only 2.5s passed total, agent kept heartbeating — claim should still be held
-    expect(registry.get('auth.ts')).toBeDefined()
-    registry.stop()
-    jest.useRealTimers()
-  })
 })
 
 describe('ClaimRegistry — waiters', () => {

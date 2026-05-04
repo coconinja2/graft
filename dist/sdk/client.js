@@ -49,6 +49,9 @@ class GraftClient {
             return false;
         }
     }
+    async forceReleaseAgent(agentId) {
+        return this.request('DELETE', `/agents/${encodeURIComponent(agentId)}/claims`);
+    }
     async listClaims() {
         return this.request('GET', '/claims');
     }

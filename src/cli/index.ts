@@ -440,23 +440,34 @@ const hook = program.command('hook').description('Internal: called by Claude Cod
 hook
   .command('pre')
   .description('preToolUse handler')
-  .requiredOption('--tool <name>', 'Tool name')
-  .requiredOption('--input <json>', 'Tool input JSON')
-  .requiredOption('--agent <id>', 'Agent ID')
+  .option('--tool <name>', 'Tool name (overrides stdin)')
+  .option('--input <json>', 'Tool input JSON (overrides stdin)')
+  .option('--agent <id>', 'Agent ID (overrides stdin session_id)')
   .option('--bus <url>', 'Bus URL')
   .action(async (opts) => {
     const { handlePreToolUse } = await import('../adapters/claude-code/hooks')
-    let toolInput: Record<string, unknown> = {}
-    try { toolInput = JSON.parse(opts.input) } catch { /* ignore */ }
-    const result = await handlePreToolUse({
-      toolName: opts.tool,
-      toolInput,
-      agentId: opts.agent,
-      busUrl: opts.bus,
-    })
+
+    // Read hook data from stdin (Claude Code sends JSON) then apply any CLI overrides
+    let stdinData: Record<string, unknown> = {}
+    if (!process.stdin.isTTY) {
+      const raw = await new Promise<string>(res => {
+        let buf = ''
+        process.stdin.setEncoding('utf8')
+        process.stdin.on('data', d => { buf += d })
+        process.stdin.on('end', () => res(buf))
+      })
+      try { stdinData = JSON.parse(raw) } catch { /* ignore */ }
+    }
+
+    const toolName: string = opts.tool ?? (stdinData.tool_name as string) ?? ''
+    const agentId: string = opts.agent ?? process.env.GRAFT_AGENT_ID ?? (stdinData.session_id as string) ?? 'unknown'
+    let toolInput: Record<string, unknown> = (stdinData.tool_input as Record<string, unknown>) ?? {}
+    if (opts.input) try { toolInput = JSON.parse(opts.input) } catch { /* ignore */ }
+
+    const result = await handlePreToolUse({ toolName, toolInput, agentId, busUrl: opts.bus })
     if (!result.proceed) {
-      if (result.message) process.stdout.write(result.message + '\n')
-      process.exit(2) // exit 2 = block the tool call
+      if (result.message) process.stderr.write(result.message + '\n')
+      process.exit(2)
     }
     if (result.message) process.stdout.write(result.message + '\n')
   })
@@ -464,20 +475,35 @@ hook
 hook
   .command('post')
   .description('postToolUse handler')
-  .requiredOption('--tool <name>', 'Tool name')
-  .requiredOption('--input <json>', 'Tool input JSON')
-  .requiredOption('--agent <id>', 'Agent ID')
+  .option('--tool <name>', 'Tool name (overrides stdin)')
+  .option('--input <json>', 'Tool input JSON (overrides stdin)')
+  .option('--agent <id>', 'Agent ID (overrides stdin session_id)')
   .option('--bus <url>', 'Bus URL')
+  .option('--output <json>', 'Tool output JSON (overrides stdin)')
   .action(async (opts) => {
     const { handlePostToolUse } = await import('../adapters/claude-code/hooks')
-    let toolInput: Record<string, unknown> = {}
-    try { toolInput = JSON.parse(opts.input) } catch { /* ignore */ }
-    await handlePostToolUse({
-      toolName: opts.tool,
-      toolInput,
-      agentId: opts.agent,
-      busUrl: opts.bus,
-    })
+
+    let stdinData: Record<string, unknown> = {}
+    if (!process.stdin.isTTY) {
+      const raw = await new Promise<string>(res => {
+        let buf = ''
+        process.stdin.setEncoding('utf8')
+        process.stdin.on('data', d => { buf += d })
+        process.stdin.on('end', () => res(buf))
+      })
+      try { stdinData = JSON.parse(raw) } catch { /* ignore */ }
+    }
+
+    const toolName: string = opts.tool ?? (stdinData.tool_name as string) ?? ''
+    const agentId: string = opts.agent ?? process.env.GRAFT_AGENT_ID ?? (stdinData.session_id as string) ?? 'unknown'
+    let toolInput: Record<string, unknown> = (stdinData.tool_input as Record<string, unknown>) ?? {}
+    if (opts.input) try { toolInput = JSON.parse(opts.input) } catch { /* ignore */ }
+    let toolOutput: Record<string, unknown> | undefined = stdinData.tool_output as Record<string, unknown> | undefined
+    if (opts.output) try { toolOutput = JSON.parse(opts.output) } catch { /* ignore */ }
+
+    const result = await handlePostToolUse({ toolName, toolInput, toolOutput, agentId, busUrl: opts.bus })
+    if (result.message) process.stdout.write(result.message + '\n')
+    if (result.warning) process.stdout.write(result.warning + '\n')
   })
 
 // ── mcp ───────────────────────────────────────────────────────────────────────

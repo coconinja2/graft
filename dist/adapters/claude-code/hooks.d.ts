@@ -22,12 +22,14 @@ export declare function handlePreToolUse(input: PreHookInput): Promise<PreHookOu
 export interface PostHookInput {
     toolName: string;
     toolInput: Record<string, unknown>;
+    toolOutput?: Record<string, unknown>;
     agentId: string;
     busUrl?: string;
     changeSummary?: ChangeSummaryPayload;
 }
 export interface PostHookOutput {
     broadcasted: boolean;
+    message?: string;
     warning?: string;
 }
 export declare function handlePostToolUse(input: PostHookInput): Promise<PostHookOutput>;

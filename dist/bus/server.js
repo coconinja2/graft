@@ -97,7 +97,11 @@ async function createServer(configPath) {
         });
     }
     const startedAt = Date.now();
-    const app = (0, fastify_1.default)({ logger: false });
+    const app = (0, fastify_1.default)({
+        logger: {
+            transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
+        },
+    });
     await app.register(cors_1.default);
     // ── Health ──────────────────────────────────────────────────────────────
     app.get('/health', async () => ({
@@ -154,6 +158,12 @@ async function createServer(configPath) {
         if (!ok)
             return reply.code(404).send({ error: 'Claim not found or not owned by agent' });
         return { ok };
+    });
+    // ── Agent liveness ───────────────────────────────────────────────────────
+    app.delete('/agents/:agent_id/claims', async (req) => {
+        const agentId = req.params.agent_id;
+        const released = registry.forceReleaseAgent(agentId);
+        return { agentId, released, count: released.length };
     });
     // ── Signals ───────────────────────────────────────────────────────────────
     app.post('/signals', async (req, reply) => {

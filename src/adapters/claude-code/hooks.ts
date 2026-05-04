@@ -117,15 +117,17 @@ export async function handlePreToolUse(input: PreHookInput): Promise<PreHookOutp
     const result = await client.claim({ resourceId, intent: `${toolName} on ${resourceId}` })
 
     if (result.granted) {
-      const msg = signalContext ? signalContext.trim() : undefined
-      return { proceed: true, message: msg }
+      const lines = [`Graft: claimed ${resourceId}`]
+      if (signalContext) lines.push(signalContext.trim())
+      return { proceed: true, message: lines.join('\n') }
     }
 
     const holder = result.holder!
     const message = [
-      `Resource ${resourceId} is currently claimed by ${holder.agentId}.`,
-      `Agent intent: "${holder.intent}"`,
+      `Graft has blocked this tool call. Another agent (${holder.agentId}) currently holds an exclusive write claim on this resource.`,
+      `Holder intent: "${holder.intent}"`,
       `Conflict ID: ${result.conflictId}`,
+      `This is not a file or tool error — it is a coordination signal. Do not retry. Either work on something else or let the user know you are waiting.`,
       signalContext,
     ]
       .filter(Boolean)
@@ -141,6 +143,7 @@ export async function handlePreToolUse(input: PreHookInput): Promise<PreHookOutp
 export interface PostHookInput {
   toolName: string
   toolInput: Record<string, unknown>
+  toolOutput?: Record<string, unknown>
   agentId: string
   busUrl?: string
   changeSummary?: ChangeSummaryPayload
@@ -148,11 +151,12 @@ export interface PostHookInput {
 
 export interface PostHookOutput {
   broadcasted: boolean
+  message?: string
   warning?: string
 }
 
 export async function handlePostToolUse(input: PostHookInput): Promise<PostHookOutput> {
-  const { toolName, toolInput, agentId, busUrl, changeSummary } = input
+  const { toolName, toolInput, toolOutput, agentId, busUrl, changeSummary } = input
   const client = new GraftClient({ busUrl, agentId })
 
   const resourceId = extractResource(toolName, toolInput)
@@ -165,29 +169,26 @@ export async function handlePostToolUse(input: PostHookInput): Promise<PostHookO
     }
 
     if (WRITE_TOOLS.has(toolName)) {
-      if (!changeSummary) {
-        await client.heartbeat(resourceId).catch(() => {})
-        return {
-          broadcasted: false,
-          warning:
-            `Graft: change_summary not broadcast for ${resourceId}. ` +
-            `Provide changeSummary (what, why, breakingChange, affectedResources) ` +
-            `so other agents can decide how to respond.`,
-        }
+      const payload: ChangeSummaryPayload = changeSummary ?? {
+        what: `${agentId} modified ${resourceId}`,
+        why: 'No summary provided — inspect the file for details.',
+        breakingChange: false,
+        affectedResources: [resourceId],
+        diff: typeof toolOutput?.patch === 'string' ? toolOutput.patch : undefined,
       }
 
       await Promise.all([
         client.heartbeat(resourceId).catch(() => {}),
         client.publish({
           type: 'change_summary',
-          message: changeSummary.what,
-          affectedResources: changeSummary.affectedResources,
-          severity: changeSummary.breakingChange ? 'high' : 'low',
-          changeContext: changeSummary,
+          message: payload.what,
+          affectedResources: payload.affectedResources,
+          severity: payload.breakingChange ? 'high' : 'low',
+          changeContext: payload,
         }).catch(() => {}),
       ])
 
-      return { broadcasted: true }
+      return { broadcasted: true, message: `Graft: released ${resourceId} — change_summary broadcast to other agents` }
     }
   } catch {
     // Bus unreachable — fail open
