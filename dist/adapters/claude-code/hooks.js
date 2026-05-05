@@ -94,6 +94,10 @@ async function handlePreToolUse(input) {
     const { toolName, toolInput, agentId, busUrl } = input;
     const client = new client_1.GraftClient({ busUrl, agentId });
     await ensureBusRunning(client.busUrl).catch(() => { });
+    // Ensure this agent has a signal queue. Idempotent — safe to call every hook.
+    // Subscribing here means agent B automatically receives change_summary signals
+    // from agent A even if B was blocked and moved on to other work.
+    await client.subscribe(['change_summary', 'interface_change', 'schema_change', 'security_finding', 'new_utility', 'resource_conflict']).catch(() => { });
     // Always deliver pending signals, regardless of whether we claim
     let signalContext = '';
     try {
