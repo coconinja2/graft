@@ -95,6 +95,7 @@ export interface ClaimOptions {
     intent: string;
     ttl?: number;
     claimType?: 'write' | 'read';
+    wait?: boolean;
 }
 import type { ChangeSummaryPayload } from '../bus/signals';
 export type { ChangeSummaryPayload };

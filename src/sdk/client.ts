@@ -90,6 +90,10 @@ export interface ClaimOptions {
   intent: string
   ttl?: number
   claimType?: 'write' | 'read'
+  // Set true only when the agent will block (via waitForRelease) if denied.
+  // Tells the bus to track this as a wait edge for deadlock detection.
+  // Leave false (default) for hook-based agents that move on when denied.
+  wait?: boolean
 }
 
 import type { ChangeSummaryPayload } from '../bus/signals'
@@ -143,6 +147,7 @@ export class GraftClient {
       intent: options.intent,
       ttl: options.ttl,
       claim_type: options.claimType,
+      wait: options.wait,
     })
   }
 

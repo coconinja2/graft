@@ -112,14 +112,18 @@ async function createServer(configPath) {
     }));
     // ── Claims ───────────────────────────────────────────────────────────────
     app.post('/claims', async (req, reply) => {
-        const { resource_id, agent_id, intent, ttl, claim_type } = req.body;
+        const { resource_id, agent_id, intent, ttl, claim_type, wait } = req.body;
         if (!resource_id || !agent_id || !intent) {
             return reply.code(400).send({ error: 'resource_id, agent_id, and intent are required' });
         }
         const result = registry.claim({ resourceId: resource_id, agentId: agent_id, intent, ttl, claimType: claim_type });
         if (!result.granted) {
-            // Register the wait edge for deadlock detection
-            deadlock.recordWait(agent_id, resource_id, result.holder.agentId);
+            if (wait) {
+                // Agent is blocking on this resource — record wait edge for deadlock detection
+                deadlock.recordWait(agent_id, resource_id, result.holder.agentId);
+            }
+            // Probe attempts (wait omitted or false) don't record a wait edge — the agent
+            // will move on, so the edge would be stale and could trigger false deadlocks
         }
         return result;
     });

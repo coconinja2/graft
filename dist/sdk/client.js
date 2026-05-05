@@ -27,6 +27,7 @@ class GraftClient {
             intent: options.intent,
             ttl: options.ttl,
             claim_type: options.claimType,
+            wait: options.wait,
         });
     }
     async release(resourceId) {
