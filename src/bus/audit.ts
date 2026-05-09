@@ -56,6 +56,7 @@ export class AuditLog {
   private deadlocks: Map<string, DeadlockEntry> = new Map()
   private seq = 0
   private maxEntries: number
+  private appendListeners: Array<(entry: AuditEntry) => void> = []
   readonly enabled: boolean
 
   constructor(maxEntries = 10_000, enabled = true) {
@@ -81,6 +82,21 @@ export class AuditLog {
     if (this.maxEntries > 0 && this.entries.length > this.maxEntries) {
       this.entries.shift()
     }
+    for (const listener of this.appendListeners) listener(entry)
+  }
+
+  /** Subscribe to all appended entries in real time. Returns an unsubscribe fn. */
+  onAppend(listener: (entry: AuditEntry) => void): () => void {
+    this.appendListeners.push(listener)
+    return () => {
+      const i = this.appendListeners.indexOf(listener)
+      if (i !== -1) this.appendListeners.splice(i, 1)
+    }
+  }
+
+  /** Return a snapshot of all entries (unfiltered, chronological order). */
+  getAll(): AuditEntry[] {
+    return this.entries.slice()
   }
 
   query(filter: AuditFilter = {}): AuditEntry[] {

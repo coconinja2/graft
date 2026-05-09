@@ -222,6 +222,38 @@ program
     }
   })
 
+// ── audit stream ──────────────────────────────────────────────────────────────
+
+program
+  .command('audit:stream')
+  .description('Tail the audit log in real time (SSE stream, Ctrl+C to stop)')
+  .action(async () => {
+    try {
+      const res = await fetch(`${BUS_URL}/audit/stream`)
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+      console.log('Streaming audit events (Ctrl+C to stop)...\n')
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const text = decoder.decode(value, { stream: true })
+        for (const line of text.split('\n')) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const e = JSON.parse(line.slice(6)) as { seq: number; ts: number; type: string; agentId: string; resourceId?: string }
+            const res2 = e.resourceId ? `  ${e.resourceId}` : ''
+            console.log(`#${e.seq}  ${tsToLocal(e.ts)}  [${e.type}]  ${e.agentId}${res2}`)
+          } catch { /* ignore malformed */ }
+        }
+      }
+    } catch (e) {
+      console.error('Stream error:', (e as Error).message)
+      process.exit(1)
+    }
+  })
+
 // ── conflicts ─────────────────────────────────────────────────────────────────
 
 const conflicts = program.command('conflicts').description('View conflict log')
@@ -504,6 +536,96 @@ hook
     const result = await handlePostToolUse({ toolName, toolInput, toolOutput, agentId, busUrl: opts.bus })
     if (result.message) process.stdout.write(result.message + '\n')
     if (result.warning) process.stdout.write(result.warning + '\n')
+  })
+
+// ── metrics ───────────────────────────────────────────────────────────────────
+
+program
+  .command('metrics')
+  .description('Show bus metrics (Prometheus format by default)')
+  .option('--json', 'Output as JSON instead of Prometheus text')
+  .action(async (opts) => {
+    try {
+      if (opts.json) {
+        const data = await api<unknown>('GET', '/metrics?format=json')
+        console.log(fmt(data))
+      } else {
+        const res = await fetch(`${BUS_URL}/metrics`)
+        if (!res.ok) throw new Error(res.statusText)
+        console.log(await res.text())
+      }
+    } catch (e) {
+      console.error('Bus unreachable:', (e as Error).message)
+      process.exit(1)
+    }
+  })
+
+// ── agents ────────────────────────────────────────────────────────────────────
+
+program
+  .command('agents')
+  .description('Show agent roster — who has been active, what they hold, their signal queue depth')
+  .option('--active', 'Show only active agents (holding claims or seen < 5 min ago)')
+  .action(async (opts) => {
+    try {
+      let roster = await api<Array<{
+        agentId: string; firstSeen: number; lastSeen: number
+        claimsGranted: number; claimsDenied: number
+        signalsPublished: number; signalsReceived: number
+        currentClaims: string[]; pendingSignals: number; active: boolean
+      }>>('GET', '/agents')
+
+      if (opts.active) roster = roster.filter(a => a.active)
+      if (roster.length === 0) { console.log('No agents recorded.'); return }
+
+      for (const a of roster) {
+        const status = a.active ? 'ACTIVE' : 'idle'
+        console.log(`${a.agentId}  [${status}]  last seen: ${tsToLocal(a.lastSeen)}`)
+        console.log(`  claims: ${a.claimsGranted} granted, ${a.claimsDenied} denied  signals: ${a.signalsPublished} sent, ${a.signalsReceived} received`)
+        if (a.currentClaims.length > 0) console.log(`  holding: ${a.currentClaims.join(', ')}`)
+        if (a.pendingSignals > 0) console.log(`  pending signals: ${a.pendingSignals}`)
+      }
+    } catch (e) {
+      console.error('Bus unreachable:', (e as Error).message)
+      process.exit(1)
+    }
+  })
+
+// ── stats ─────────────────────────────────────────────────────────────────────
+
+const stats = program.command('stats').description('Aggregated coordination statistics')
+
+stats
+  .command('contention')
+  .description('Show contention heatmap — most contested resources')
+  .option('--limit <n>', 'Max resources to show (default: 20)')
+  .action(async (opts) => {
+    try {
+      const params = opts.limit ? `?limit=${opts.limit}` : ''
+      const list = await api<Array<{
+        resourceId: string; denials: number; lastDeniedAt: number
+        topRequestingAgents: Array<{ agentId: string; count: number }>
+        topBlockingAgents: Array<{ agentId: string; count: number }>
+      }>>('GET', `/stats/contention${params}`)
+
+      if (list.length === 0) { console.log('No contention recorded.'); return }
+
+      console.log(`${'Resource'.padEnd(50)} ${'Denials'.padStart(8)}  Last denied`)
+      console.log('─'.repeat(75))
+      for (const entry of list) {
+        const res = entry.resourceId.length > 48 ? '…' + entry.resourceId.slice(-47) : entry.resourceId
+        console.log(`${res.padEnd(50)} ${String(entry.denials).padStart(8)}  ${tsToLocal(entry.lastDeniedAt)}`)
+        if (entry.topBlockingAgents.length > 0) {
+          console.log(`  blocked by: ${entry.topBlockingAgents.map(a => `${a.agentId}(${a.count})`).join(', ')}`)
+        }
+        if (entry.topRequestingAgents.length > 0) {
+          console.log(`  requested by: ${entry.topRequestingAgents.map(a => `${a.agentId}(${a.count})`).join(', ')}`)
+        }
+      }
+    } catch (e) {
+      console.error('Bus unreachable:', (e as Error).message)
+      process.exit(1)
+    }
   })
 
 // ── mcp ───────────────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import { ClaimRegistry } from './registry'
 import { SignalBus } from './signals'
 import { ResourcePool } from './pool'
 import { DeadlockDetector } from './deadlock'
+import { MetricsCollector } from './metrics'
 
 interface GraftConfig {
   bus: { port: number; backend: string; audit_max_entries: number; audit_enabled: boolean }
@@ -78,6 +79,7 @@ export async function createServer(configPath?: string) {
   }
 
   const startedAt = Date.now()
+  const metrics = new MetricsCollector(audit, registry, signals, pool)
 
   const app = Fastify({
     logger: {
@@ -336,7 +338,48 @@ export async function createServer(configPath?: string) {
     }
   )
 
-  return { app, registry, signals, pool, deadlock, audit, config }
+  // ── Metrics ───────────────────────────────────────────────────────────────
+
+  app.get<{ Querystring: { format?: string } }>('/metrics', async (req, reply) => {
+    if (req.query.format === 'json') {
+      return metrics.toJSON()
+    }
+    reply.header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+    return metrics.toPrometheus()
+  })
+
+  // ── Audit stream (SSE) ────────────────────────────────────────────────────
+
+  app.get('/audit/stream', (req, reply) => {
+    reply.hijack()
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    })
+    reply.raw.write(':ok\n\n')
+
+    const unsubscribe = audit.onAppend((entry) => {
+      if (!reply.raw.destroyed) {
+        reply.raw.write(`data: ${JSON.stringify(entry)}\n\n`)
+      }
+    })
+
+    reply.raw.on('close', () => unsubscribe())
+  })
+
+  // ── Contention heatmap ────────────────────────────────────────────────────
+
+  app.get<{ Querystring: { limit?: string } }>('/stats/contention', async (req) =>
+    metrics.computeContention(req.query.limit ? Number(req.query.limit) : 20)
+  )
+
+  // ── Agent roster ──────────────────────────────────────────────────────────
+
+  app.get('/agents', async () => metrics.computeAgentRoster())
+
+  return { app, registry, signals, pool, deadlock, audit, metrics, config }
 }
 
 function isWaveDone(wave: WaveState): boolean {
