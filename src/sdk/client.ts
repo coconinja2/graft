@@ -1,6 +1,12 @@
 // TypeScript SDK — wraps all Graft bus HTTP endpoints with typed interfaces
 
+export interface LineRange {
+  start: number  // 1-based, inclusive
+  end: number    // 1-based, inclusive
+}
+
 export interface Claim {
+  claimId: string
   resourceId: string
   agentId: string
   intent: string
@@ -9,12 +15,13 @@ export interface Claim {
   expiresAt: number
   lastHeartbeat: number
   claimType: 'write' | 'read'
+  lineRange?: LineRange
 }
 
 export interface ClaimResult {
   granted: boolean
   claim?: Claim
-  holder?: { agentId: string; intent: string; claimedAt: number; ttl: number }
+  holder?: { agentId: string; intent: string; claimedAt: number; ttl: number; lineRange?: LineRange }
   conflictId?: string
 }
 
@@ -90,6 +97,8 @@ export interface ClaimOptions {
   intent: string
   ttl?: number
   claimType?: 'write' | 'read'
+  lineStart?: number  // 1-based; omit for whole-file claim
+  lineEnd?: number    // 1-based, inclusive; must be provided with lineStart
   // Set true only when the agent will block (via waitForRelease) if denied.
   // Tells the bus to track this as a wait edge for deadlock detection.
   // Leave false (default) for hook-based agents that move on when denied.
@@ -147,14 +156,29 @@ export class GraftClient {
       intent: options.intent,
       ttl: options.ttl,
       claim_type: options.claimType,
+      line_start: options.lineStart,
+      line_end: options.lineEnd,
       wait: options.wait,
     })
   }
 
-  async release(resourceId: string): Promise<boolean> {
+  async release(resourceId: string, lineStart?: number, lineEnd?: number): Promise<boolean> {
+    const params = new URLSearchParams({ agent_id: this.agentId })
+    if (lineStart != null && lineEnd != null) {
+      params.set('line_start', String(lineStart))
+      params.set('line_end', String(lineEnd))
+    }
     const res = await this.request<{ released: boolean }>(
       'DELETE',
-      `/claims/${encodeURIComponent(resourceId)}?agent_id=${encodeURIComponent(this.agentId)}`
+      `/claims/${encodeURIComponent(resourceId)}?${params}`
+    )
+    return res.released
+  }
+
+  async releaseById(claimId: string): Promise<boolean> {
+    const res = await this.request<{ released: boolean }>(
+      'DELETE',
+      `/claim/${encodeURIComponent(claimId)}?agent_id=${encodeURIComponent(this.agentId)}`
     )
     return res.released
   }
@@ -187,8 +211,13 @@ export class GraftClient {
     return this.request('GET', '/claims')
   }
 
-  async getClaim(resourceId: string): Promise<Claim | null> {
+  /** Returns all active claims on a resource (multiple when non-overlapping line ranges coexist). */
+  async getClaims(resourceId: string): Promise<Claim[]> {
     return this.request('GET', `/claims/${encodeURIComponent(resourceId)}`)
+  }
+
+  async getClaimById(claimId: string): Promise<Claim | null> {
+    return this.request('GET', `/claim/${encodeURIComponent(claimId)}`)
   }
 
   // ── Signals ─────────────────────────────────────────────────────────────

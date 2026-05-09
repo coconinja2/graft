@@ -8,7 +8,13 @@ import httpx
 from pydantic import BaseModel
 
 
+class LineRange(BaseModel):
+    start: int  # 1-based, inclusive
+    end: int    # 1-based, inclusive
+
+
 class Claim(BaseModel):
+    claimId: str
     resourceId: str
     agentId: str
     intent: str
@@ -17,6 +23,7 @@ class Claim(BaseModel):
     expiresAt: int
     lastHeartbeat: int
     claimType: str
+    lineRange: Optional[LineRange] = None
 
 
 class ClaimHolder(BaseModel):
@@ -24,6 +31,7 @@ class ClaimHolder(BaseModel):
     intent: str
     claimedAt: int
     ttl: int
+    lineRange: Optional[LineRange] = None
 
 
 class ClaimResult(BaseModel):
@@ -119,22 +127,38 @@ class GraftClient:
 
     # ── Claims ──────────────────────────────────────────────────────────────
 
-    def claim(self, resource_id: str, intent: str, ttl: int = 120, claim_type: str = "write") -> ClaimResult:
-        data = self._request("POST", "/claims", json={
+    def claim(
+        self,
+        resource_id: str,
+        intent: str,
+        ttl: int = 120,
+        claim_type: str = "write",
+        line_start: Optional[int] = None,
+        line_end: Optional[int] = None,
+    ) -> ClaimResult:
+        body: dict[str, Any] = {
             "resource_id": resource_id,
             "agent_id": self.agent_id,
             "intent": intent,
             "ttl": ttl,
             "claim_type": claim_type,
-        })
+        }
+        if line_start is not None and line_end is not None:
+            body["line_start"] = line_start
+            body["line_end"] = line_end
+        data = self._request("POST", "/claims", json=body)
         return ClaimResult(**data)
 
-    def release(self, resource_id: str) -> bool:
-        data = self._request(
-            "DELETE",
-            f"/claims/{resource_id}",
-            params={"agent_id": self.agent_id},
-        )
+    def release(self, resource_id: str, line_start: Optional[int] = None, line_end: Optional[int] = None) -> bool:
+        params: dict[str, Any] = {"agent_id": self.agent_id}
+        if line_start is not None and line_end is not None:
+            params["line_start"] = line_start
+            params["line_end"] = line_end
+        data = self._request("DELETE", f"/claims/{resource_id}", params=params)
+        return data.get("released", False)
+
+    def release_by_id(self, claim_id: str) -> bool:
+        data = self._request("DELETE", f"/claim/{claim_id}", params={"agent_id": self.agent_id})
         return data.get("released", False)
 
     def heartbeat(self, resource_id: str) -> bool:
@@ -160,8 +184,12 @@ class GraftClient:
     def list_claims(self) -> list[Claim]:
         return [Claim(**c) for c in self._request("GET", "/claims")]
 
-    def get_claim(self, resource_id: str) -> Optional[Claim]:
-        data = self._request("GET", f"/claims/{resource_id}")
+    def get_claims(self, resource_id: str) -> list[Claim]:
+        """Returns all active claims on a resource (multiple when non-overlapping line ranges coexist)."""
+        return [Claim(**c) for c in self._request("GET", f"/claims/{resource_id}")]
+
+    def get_claim_by_id(self, claim_id: str) -> Optional[Claim]:
+        data = self._request("GET", f"/claim/{claim_id}")
         return Claim(**data) if data else None
 
     # ── Signals ─────────────────────────────────────────────────────────────

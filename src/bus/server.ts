@@ -99,42 +99,54 @@ export async function createServer(configPath?: string) {
 
   // ── Claims ───────────────────────────────────────────────────────────────
 
-  app.post<{ Body: { resource_id: string; agent_id: string; intent: string; ttl?: number; claim_type?: 'write' | 'read'; wait?: boolean } }>(
+  app.post<{ Body: { resource_id: string; agent_id: string; intent: string; ttl?: number; claim_type?: 'write' | 'read'; wait?: boolean; line_start?: number; line_end?: number } }>(
     '/claims',
     async (req, reply) => {
-      const { resource_id, agent_id, intent, ttl, claim_type, wait } = req.body
+      const { resource_id, agent_id, intent, ttl, claim_type, wait, line_start, line_end } = req.body
       if (!resource_id || !agent_id || !intent) {
         return reply.code(400).send({ error: 'resource_id, agent_id, and intent are required' })
       }
-      const result = registry.claim({ resourceId: resource_id, agentId: agent_id, intent, ttl, claimType: claim_type })
-      if (!result.granted) {
-        if (wait) {
-          // Agent is blocking on this resource — record wait edge for deadlock detection
-          deadlock.recordWait(agent_id, resource_id, result.holder!.agentId)
-        }
-        // Probe attempts (wait omitted or false) don't record a wait edge — the agent
-        // will move on, so the edge would be stale and could trigger false deadlocks
+      const lineRange = (line_start != null && line_end != null) ? { start: line_start, end: line_end } : undefined
+      const result = registry.claim({ resourceId: resource_id, agentId: agent_id, intent, ttl, claimType: claim_type, lineRange })
+      if (!result.granted && wait) {
+        deadlock.recordWait(agent_id, resource_id, result.holder!.agentId)
       }
       return result
     }
   )
 
-  app.delete<{ Params: { resource_id: string }; Querystring: { agent_id: string } }>(
+  app.delete<{ Params: { resource_id: string }; Querystring: { agent_id: string; line_start?: string; line_end?: string } }>(
     '/claims/:resource_id',
     async (req, reply) => {
       const { resource_id } = req.params
+      const { agent_id, line_start, line_end } = req.query
+      if (!agent_id) return reply.code(400).send({ error: 'agent_id query param required' })
+      deadlock.clearWait(agent_id)
+      const lineRange = (line_start != null && line_end != null)
+        ? { start: Number(line_start), end: Number(line_end) }
+        : undefined
+      const released = registry.release(decodeURIComponent(resource_id), agent_id, lineRange)
+      return { released }
+    }
+  )
+
+  // Release a specific claim by its UUID (more precise than by resource+agent)
+  app.delete<{ Params: { claim_id: string }; Querystring: { agent_id: string } }>(
+    '/claim/:claim_id',
+    async (req, reply) => {
       const { agent_id } = req.query
       if (!agent_id) return reply.code(400).send({ error: 'agent_id query param required' })
       deadlock.clearWait(agent_id)
-      const released = registry.release(decodeURIComponent(resource_id), agent_id)
+      const released = registry.releaseById(req.params.claim_id, agent_id)
       return { released }
     }
   )
 
   app.get('/claims', async () => registry.list())
 
+  // Returns all active claims on a resource as an array (multiple non-overlapping line-range claims possible)
   app.get<{ Params: { resource_id: string } }>('/claims/:resource_id', async (req) => {
-    return registry.get(decodeURIComponent(req.params.resource_id)) ?? null
+    return registry.get(decodeURIComponent(req.params.resource_id))
   })
 
   app.get<{ Params: { resource_id: string }; Querystring: { timeout_ms?: string } }>(
@@ -143,7 +155,7 @@ export async function createServer(configPath?: string) {
       const resourceId = decodeURIComponent(req.params.resource_id)
       const timeoutMs = Math.min(Number(req.query.timeout_ms ?? 30_000), 300_000)
 
-      if (!registry.get(resourceId)) {
+      if (registry.get(resourceId).length === 0) {
         return { released: true, resourceId }
       }
 

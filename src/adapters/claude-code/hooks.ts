@@ -8,9 +8,11 @@
  * which are wired into Claude Code via .claude/settings.json.
  */
 
+import * as fs from 'fs'
 import * as path from 'path'
 import { GraftClient } from '../../sdk/client'
 import type { ChangeSummaryPayload } from '../../bus/signals'
+import type { LineRange } from '../../bus/registry'
 
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'Bash', 'NotebookEdit'])
 
@@ -35,24 +37,54 @@ async function ensureBusRunning(busUrl: string): Promise<void> {
 }
 const READ_TOOLS = new Set(['Read'])
 
-function extractResource(toolName: string, toolInput: Record<string, unknown>): string | null {
+interface ResourceInfo {
+  resourceId: string
+  lineRange?: LineRange
+}
+
+function extractResource(toolName: string, toolInput: Record<string, unknown>): ResourceInfo | null {
   switch (toolName) {
     case 'Write':
-    case 'Read':
-      return (toolInput.file_path as string) ?? null
-    case 'Edit':
-      return (toolInput.file_path as string) ?? null
-    case 'NotebookEdit':
-      return (toolInput.notebook_path as string) ?? null
+    case 'Read': {
+      const filePath = toolInput.file_path as string | undefined
+      return filePath ? { resourceId: filePath } : null
+    }
+    case 'Edit': {
+      const filePath = toolInput.file_path as string | undefined
+      if (!filePath) return null
+      const oldString = toolInput.old_string as string | undefined
+      const lineRange = oldString ? resolveLineRange(filePath, oldString) : undefined
+      return { resourceId: filePath, lineRange }
+    }
+    case 'NotebookEdit': {
+      const notebookPath = toolInput.notebook_path as string | undefined
+      return notebookPath ? { resourceId: notebookPath } : null
+    }
     case 'Bash': {
-      // Best-effort: extract first file-like token from the command
-      const cmd = toolInput.command as string
+      const cmd = toolInput.command as string | undefined
       if (!cmd) return null
       const match = cmd.match(/(?:^|\s)([\w./\-]+\.\w+)/)
-      return match ? match[1] : null
+      return match ? { resourceId: match[1] } : null
     }
     default:
       return null
+  }
+}
+
+// Read the file before the edit executes and locate old_string to compute its line range.
+// Returns undefined when the file doesn't exist, old_string isn't found, or it appears
+// more than once (ambiguous — fall back to whole-file claim).
+function resolveLineRange(filePath: string, oldString: string): LineRange | undefined {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8')
+    const idx = content.indexOf(oldString)
+    if (idx === -1) return undefined
+    if (content.indexOf(oldString, idx + 1) !== -1) return undefined  // multiple matches
+    const lineStart = content.slice(0, idx).split('\n').length
+    const lineEnd = lineStart + oldString.split('\n').length - 1
+    return { start: lineStart, end: lineEnd }
+  } catch {
+    return undefined
   }
 }
 
@@ -113,23 +145,27 @@ export async function handlePreToolUse(input: PreHookInput): Promise<PreHookOutp
     return { proceed: true }
   }
 
-  const resourceId = extractResource(toolName, toolInput)
-  if (!resourceId) {
+  const resource = extractResource(toolName, toolInput)
+  if (!resource) {
     return { proceed: true, message: signalContext.trim() || undefined }
   }
 
+  const { resourceId, lineRange } = resource
+  const rangeDesc = lineRange ? ` lines ${lineRange.start}–${lineRange.end}` : ''
+
   try {
-    const result = await client.claim({ resourceId, intent: `${toolName} on ${resourceId}` })
+    const result = await client.claim({ resourceId, lineStart: lineRange?.start, lineEnd: lineRange?.end, intent: `${toolName} on ${resourceId}${rangeDesc}` })
 
     if (result.granted) {
-      const lines = [`Graft: claimed ${resourceId}`]
+      const lines = [`Graft: claimed ${resourceId}${rangeDesc}`]
       if (signalContext) lines.push(signalContext.trim())
       return { proceed: true, message: lines.join('\n') }
     }
 
     const holder = result.holder!
+    const holderRange = holder.lineRange ? ` (lines ${holder.lineRange.start}–${holder.lineRange.end})` : ''
     const message = [
-      `Graft has blocked this tool call. Another agent (${holder.agentId}) currently holds an exclusive write claim on this resource.`,
+      `Graft has blocked this tool call. Another agent (${holder.agentId}) holds an exclusive write claim on ${resourceId}${holderRange}.`,
       `Holder intent: "${holder.intent}"`,
       `Conflict ID: ${result.conflictId}`,
       `This is not a file or tool error — it is a coordination signal. Do not retry. Either work on something else or let the user know you are waiting.`,
@@ -164,8 +200,9 @@ export async function handlePostToolUse(input: PostHookInput): Promise<PostHookO
   const { toolName, toolInput, toolOutput, agentId, busUrl, changeSummary } = input
   const client = new GraftClient({ busUrl, agentId })
 
-  const resourceId = extractResource(toolName, toolInput)
-  if (!resourceId) return { broadcasted: false }
+  const resource = extractResource(toolName, toolInput)
+  if (!resource) return { broadcasted: false }
+  const { resourceId } = resource
 
   try {
     if (READ_TOOLS.has(toolName)) {

@@ -46,8 +46,8 @@ describe('DeadlockDetector', () => {
     detector.recordWait('agent-b', 'r1', 'agent-a')
     detector.detect()
     // One of the two claims in the cycle must be force-released to break it
-    const r1Released = registry.get('r1') === undefined
-    const r2Released = registry.get('r2') === undefined
+    const r1Released = registry.get('r1').length === 0
+    const r2Released = registry.get('r2').length === 0
     expect(r1Released || r2Released).toBe(true)
     const deadlocks = audit.queryDeadlocks()
     expect(deadlocks[0].resolution).toBe('expired_oldest_claim')
