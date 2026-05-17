@@ -3,6 +3,8 @@ import { ClaimRegistry } from './registry';
 import { SignalBus } from './signals';
 import { ResourcePool } from './pool';
 import { DeadlockDetector } from './deadlock';
+import { MetricsCollector } from './metrics';
+import { SelfHealer } from './healer';
 interface GraftConfig {
     bus: {
         port: number;
@@ -13,6 +15,12 @@ interface GraftConfig {
     agents: {
         heartbeat_interval: number;
         claim_ttl: number;
+    };
+    healer: {
+        enabled: boolean;
+        interval_ms: number;
+        starvation_threshold_ms: number;
+        auto_heal: boolean;
     };
     pools: Record<string, {
         resources: string[];
@@ -29,6 +37,8 @@ export declare function createServer(configPath?: string): Promise<{
     pool: ResourcePool;
     deadlock: DeadlockDetector;
     audit: AuditLog;
+    metrics: MetricsCollector;
+    healer: SelfHealer;
     config: GraftConfig;
 }>;
 export declare function startServer(port?: number, configPath?: string): Promise<void>;

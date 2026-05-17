@@ -68,41 +68,85 @@ The Claude Code `Edit` hook automatically computes line ranges from `old_string`
 - `getClaims(resourceId)` — returns all active claims on a resource (multiple when non-overlapping ranges coexist)
 - `getClaimById(claimId)` — look up a claim by its UUID
 
-### Observability
+### Dashboard, Observability & Self-Healing
 
-The bus now exposes four new observability surfaces:
+Graft ships a live web dashboard and a self-healing agent that watches the bus and resolves stuck coordination automatically.
 
-**Prometheus metrics** — scrape at `/metrics` for counters, gauges, and histograms:
+#### Dashboard
+
+Open [`http://localhost:7433/dashboard`](http://localhost:7433/dashboard) after `graft start`.
+
+![Graft Dashboard](docs/screenshots/dashboard.png)
+
+Nine panels update in real time via SSE + 3-second polling:
+
+| Panel | What it shows |
+|---|---|
+| **Agent Roster** | Every agent — active claims (green tags), grant/deny counts, pending signals, last activity |
+| **Live Event Stream** | Every audit event as it happens — color-coded by type |
+| **Contention Heatmap** | Most-contested resources ranked by denial count |
+| **Dependency Graph** | SVG DAG: who holds what, who is waiting — green = holds, red dashed = waiting |
+| **Coordination Efficiency** | Per-agent score 0–100% based on block rate + avg blocked time |
+| **Metrics Bar** | Granted/denied/expired/released + signal counts + claim hold p50/p95 + signal latency |
+| **Conflicts** | All claim conflicts with resolution status and age |
+| **Deadlocks** | Detected cycles and resolutions |
+| **Healer Log** | Every starvation detection and force-release the healer performed |
+
+![Dependency Graph](docs/screenshots/dashboard-graph.png)
+*Live dependency graph during a 3-agent run. `agent-db` holds `schema.ts` and `types.ts`. `agent-infra` holds `ports.ts`. Resources with active waiters render in red.*
+
+#### Self-Healing Agent
+
+The bus runs a background `SelfHealer` that detects and resolves stuck coordination without operator intervention.
+
+**What it detects:** starvation — a conflict that has been `pending` longer than `starvation_threshold_ms` (default 30s), meaning the holding agent crashed, hung, or is taking far longer than its declared TTL.
+
+**What it does:**
+1. Writes a `starvation_detected` audit event (visible in the SSE stream and Live Events panel)
+2. If `auto_heal: true` (default): force-releases the held resource, writes a `healer_action` entry, unblocks any waiters
+
+![Healer Log](docs/screenshots/dashboard-healer.png)
+*Healer log: one force-release on `constants.ts` — the holding agent stopped heartbeating, starvation was detected at 30s, and the resource was freed.*
+
+Configure in `graft.config.yaml`:
+
+```yaml
+healer:
+  enabled: true
+  interval_ms: 15000             # how often the healer checks (default: 15s)
+  starvation_threshold_ms: 30000 # conflict age before action (default: 30s)
+  auto_heal: true                # false = log only, no force-release
 ```
-GET /metrics              # Prometheus text format
-GET /metrics?format=json  # structured JSON
-```
-Includes: `graft_claims_total`, `graft_signals_total`, `graft_claim_hold_duration_seconds` (histogram), `graft_signal_latency_seconds` (histogram), `graft_active_claims` (gauge), `graft_pool_available` (gauge).
 
-**Live audit stream** — SSE stream of every bus event as it happens:
+#### New observability endpoints
+
+```
+GET /dashboard               # Live web dashboard
+GET /graph                   # Dependency DAG — nodes (agents + resources) + edges (holds / waiting_for)
+GET /stats/efficiency        # Per-agent coordination efficiency scores
+GET /metrics                 # Prometheus text format
+GET /metrics?format=json     # Structured JSON metrics
+GET /audit/stream            # SSE stream of every bus event in real time
+GET /stats/contention        # Most-contested resources ranked by denial count
+GET /agents                  # Live agent roster
+```
+
+Audit event types now include `starvation_detected` and `healer_action` — both appear in the SSE stream and are queryable via `/audit?type=starvation_detected`.
+
+Every `AuditEntry` optionally carries `causedBySignalId` — when an agent acts in response to a received signal, the subsequent claim or release is linked to the originating signal, enabling causal chain reconstruction in post-mortem analysis.
+
+**CLI commands:**
 ```bash
-curl -N http://localhost:7433/audit/stream
+graft metrics                  # Prometheus metrics
+graft agents                   # Agent roster
+graft stats contention         # Contention heatmap
+graft audit:stream             # Stream live audit events
 ```
-Each event is a JSON-encoded audit entry pushed over `text/event-stream`. Useful for real-time dashboards and debugging parallel runs as they execute.
 
-**Contention heatmap** — ranked list of most-contested resources:
-```
-GET /stats/contention?limit=20
-```
-Returns resources sorted by denial count, with top requesting agents and top blocking agents per resource. Use this to find files that are slowing your agent fleet down.
-
-**Agent roster** — live snapshot of all agent sessions:
-```
-GET /agents
-```
-Returns per-agent stats: last seen timestamp, active claim count, pending signal count, total events in audit log. Sorted by most-recently-active.
-
-**CLI commands** added:
+**Simulate and screenshot:**
 ```bash
-graft metrics                  # print Prometheus metrics
-graft agents                   # list agent sessions
-graft stats contention         # show contention heatmap
-graft audit:stream             # stream live audit events
+npm run simulate    # Spin up 3 synthetic agents with conflicts and signals
+npm run screenshot  # Capture dashboard screenshots to docs/screenshots/
 ```
 
 ### Dead Agent Detection & Auto-Recovery

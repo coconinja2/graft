@@ -1,4 +1,9 @@
+export interface LineRange {
+    start: number;
+    end: number;
+}
 export interface Claim {
+    claimId: string;
     resourceId: string;
     agentId: string;
     intent: string;
@@ -7,6 +12,7 @@ export interface Claim {
     expiresAt: number;
     lastHeartbeat: number;
     claimType: 'write' | 'read';
+    lineRange?: LineRange;
 }
 export interface ClaimResult {
     granted: boolean;
@@ -16,6 +22,7 @@ export interface ClaimResult {
         intent: string;
         claimedAt: number;
         ttl: number;
+        lineRange?: LineRange;
     };
     conflictId?: string;
 }
@@ -95,6 +102,8 @@ export interface ClaimOptions {
     intent: string;
     ttl?: number;
     claimType?: 'write' | 'read';
+    lineStart?: number;
+    lineEnd?: number;
     wait?: boolean;
 }
 import type { ChangeSummaryPayload } from '../bus/signals';
@@ -119,7 +128,8 @@ export declare class GraftClient {
     constructor(options: GraftClientOptions);
     private request;
     claim(options: ClaimOptions): Promise<ClaimResult>;
-    release(resourceId: string): Promise<boolean>;
+    release(resourceId: string, lineStart?: number, lineEnd?: number): Promise<boolean>;
+    releaseById(claimId: string): Promise<boolean>;
     waitForRelease(resourceId: string, timeoutMs?: number): Promise<void>;
     heartbeat(resourceId: string): Promise<boolean>;
     forceReleaseAgent(agentId: string): Promise<{
@@ -128,7 +138,9 @@ export declare class GraftClient {
         count: number;
     }>;
     listClaims(): Promise<Claim[]>;
-    getClaim(resourceId: string): Promise<Claim | null>;
+    /** Returns all active claims on a resource (multiple when non-overlapping line ranges coexist). */
+    getClaims(resourceId: string): Promise<Claim[]>;
+    getClaimById(claimId: string): Promise<Claim | null>;
     subscribe(types: string[]): Promise<void>;
     publish(options: PublishOptions): Promise<Signal>;
     getPendingSignals(): Promise<Signal[]>;

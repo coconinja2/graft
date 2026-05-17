@@ -8,6 +8,7 @@ class AuditLog {
         this.conflicts = new Map();
         this.deadlocks = new Map();
         this.seq = 0;
+        this.appendListeners = [];
         this.maxEntries = maxEntries;
         this.enabled = enabled;
     }
@@ -26,6 +27,21 @@ class AuditLog {
         if (this.maxEntries > 0 && this.entries.length > this.maxEntries) {
             this.entries.shift();
         }
+        for (const listener of this.appendListeners)
+            listener(entry);
+    }
+    /** Subscribe to all appended entries in real time. Returns an unsubscribe fn. */
+    onAppend(listener) {
+        this.appendListeners.push(listener);
+        return () => {
+            const i = this.appendListeners.indexOf(listener);
+            if (i !== -1)
+                this.appendListeners.splice(i, 1);
+        };
+    }
+    /** Return a snapshot of all entries (unfiltered, chronological order). */
+    getAll() {
+        return this.entries.slice();
     }
     query(filter = {}) {
         let result = this.entries.slice();

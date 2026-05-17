@@ -11,6 +11,8 @@ export type AuditEventType =
   | 'pool_released'
   | 'deadlock_detected'
   | 'deadlock_resolved'
+  | 'starvation_detected'
+  | 'healer_action'
 
 export interface AuditEntry {
   seq: number
@@ -21,6 +23,7 @@ export interface AuditEntry {
   signalId?: string
   conflictId?: string
   deadlockId?: string
+  causedBySignalId?: string
   detail: Record<string, unknown>
 }
 
@@ -67,7 +70,7 @@ export class AuditLog {
   append(
     type: AuditEventType,
     agentId: string,
-    fields: Partial<Omit<AuditEntry, 'seq' | 'ts' | 'type' | 'agentId'>> = {}
+    fields: Partial<Omit<AuditEntry, 'seq' | 'ts' | 'type' | 'agentId'>> = {},
   ): void {
     if (!this.enabled) return
     const entry: AuditEntry = {

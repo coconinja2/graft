@@ -44,6 +44,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.handlePreToolUse = handlePreToolUse;
 exports.handlePostToolUse = handlePostToolUse;
+const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const client_1 = require("../../sdk/client");
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'Bash', 'NotebookEdit']);
@@ -72,22 +73,50 @@ const READ_TOOLS = new Set(['Read']);
 function extractResource(toolName, toolInput) {
     switch (toolName) {
         case 'Write':
-        case 'Read':
-            return toolInput.file_path ?? null;
-        case 'Edit':
-            return toolInput.file_path ?? null;
-        case 'NotebookEdit':
-            return toolInput.notebook_path ?? null;
+        case 'Read': {
+            const filePath = toolInput.file_path;
+            return filePath ? { resourceId: filePath } : null;
+        }
+        case 'Edit': {
+            const filePath = toolInput.file_path;
+            if (!filePath)
+                return null;
+            const oldString = toolInput.old_string;
+            const lineRange = oldString ? resolveLineRange(filePath, oldString) : undefined;
+            return { resourceId: filePath, lineRange };
+        }
+        case 'NotebookEdit': {
+            const notebookPath = toolInput.notebook_path;
+            return notebookPath ? { resourceId: notebookPath } : null;
+        }
         case 'Bash': {
-            // Best-effort: extract first file-like token from the command
             const cmd = toolInput.command;
             if (!cmd)
                 return null;
             const match = cmd.match(/(?:^|\s)([\w./\-]+\.\w+)/);
-            return match ? match[1] : null;
+            return match ? { resourceId: match[1] } : null;
         }
         default:
             return null;
+    }
+}
+// Read the file before the edit executes and locate old_string to compute its line range.
+// Returns undefined when the file doesn't exist, old_string isn't found, or it appears
+// more than once (ambiguous — fall back to whole-file claim).
+function resolveLineRange(filePath, oldString) {
+    try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const idx = content.indexOf(oldString);
+        if (idx === -1)
+            return undefined;
+        if (content.indexOf(oldString, idx + 1) !== -1)
+            return undefined; // multiple matches
+        const lineStart = content.slice(0, idx).split('\n').length;
+        const lineEnd = lineStart + oldString.split('\n').length - 1;
+        return { start: lineStart, end: lineEnd };
+    }
+    catch {
+        return undefined;
     }
 }
 async function handlePreToolUse(input) {
@@ -97,7 +126,7 @@ async function handlePreToolUse(input) {
     // Ensure this agent has a signal queue. Idempotent — safe to call every hook.
     // Subscribing here means agent B automatically receives change_summary signals
     // from agent A even if B was blocked and moved on to other work.
-    await client.subscribe(['change_summary', 'interface_change', 'schema_change', 'security_finding', 'new_utility', 'resource_conflict']).catch(() => { });
+    await (client.subscribe?.(['change_summary', 'interface_change', 'schema_change', 'security_finding', 'new_utility', 'resource_conflict']) ?? Promise.resolve()).catch(() => { });
     // Always deliver pending signals, regardless of whether we claim
     let signalContext = '';
     try {
@@ -134,21 +163,23 @@ async function handlePreToolUse(input) {
         }
         return { proceed: true };
     }
-    const resourceId = extractResource(toolName, toolInput);
-    if (!resourceId) {
+    const resource = extractResource(toolName, toolInput);
+    if (!resource) {
         return { proceed: true, message: signalContext.trim() || undefined };
     }
+    const { resourceId, lineRange } = resource;
+    const rangeDesc = lineRange ? ` lines ${lineRange.start}–${lineRange.end}` : '';
     try {
-        const result = await client.claim({ resourceId, intent: `${toolName} on ${resourceId}` });
+        const result = await client.claim({ resourceId, lineStart: lineRange?.start, lineEnd: lineRange?.end, intent: `${toolName} on ${resourceId}${rangeDesc}` });
         if (result.granted) {
-            const lines = [`Graft: claimed ${resourceId}`];
             if (signalContext)
-                lines.push(signalContext.trim());
-            return { proceed: true, message: lines.join('\n') };
+                return { proceed: true, message: signalContext.trim() };
+            return { proceed: true };
         }
         const holder = result.holder;
+        const holderRange = holder.lineRange ? ` (lines ${holder.lineRange.start}–${holder.lineRange.end})` : '';
         const message = [
-            `Graft has blocked this tool call. Another agent (${holder.agentId}) currently holds an exclusive write claim on this resource.`,
+            `Graft has blocked this tool call. Another agent (${holder.agentId}) holds an exclusive write claim on ${resourceId}${holderRange}.`,
             `Holder intent: "${holder.intent}"`,
             `Conflict ID: ${result.conflictId}`,
             `This is not a file or tool error — it is a coordination signal. Do not retry. Either work on something else or let the user know you are waiting.`,
@@ -164,35 +195,33 @@ async function handlePreToolUse(input) {
     }
 }
 async function handlePostToolUse(input) {
-    const { toolName, toolInput, toolOutput, agentId, busUrl, changeSummary } = input;
+    const { toolName, toolInput, agentId, busUrl, changeSummary } = input;
     const client = new client_1.GraftClient({ busUrl, agentId });
-    const resourceId = extractResource(toolName, toolInput);
-    if (!resourceId)
+    const resource = extractResource(toolName, toolInput);
+    if (!resource)
         return { broadcasted: false };
+    const { resourceId } = resource;
     try {
         if (READ_TOOLS.has(toolName)) {
             await client.release(resourceId);
             return { broadcasted: false };
         }
         if (WRITE_TOOLS.has(toolName)) {
-            const payload = changeSummary ?? {
-                what: `${agentId} modified ${resourceId}`,
-                why: 'No summary provided — inspect the file for details.',
-                breakingChange: false,
-                affectedResources: [resourceId],
-                diff: typeof toolOutput?.patch === 'string' ? toolOutput.patch : undefined,
-            };
-            await Promise.all([
-                client.heartbeat(resourceId).catch(() => { }),
-                client.publish({
-                    type: 'change_summary',
-                    message: payload.what,
-                    affectedResources: payload.affectedResources,
-                    severity: payload.breakingChange ? 'high' : 'low',
-                    changeContext: payload,
-                }).catch(() => { }),
-            ]);
-            return { broadcasted: true, message: `Graft: released ${resourceId} — change_summary broadcast to other agents` };
+            await client.heartbeat(resourceId).catch(() => { });
+            if (!changeSummary) {
+                return {
+                    broadcasted: false,
+                    warning: `change_summary not broadcast — no changeSummary provided to postToolUse hook for ${resourceId}. Pass a changeSummary with what/why/breakingChange/affectedResources.`,
+                };
+            }
+            await client.publish({
+                type: 'change_summary',
+                message: changeSummary.what,
+                affectedResources: changeSummary.affectedResources,
+                severity: changeSummary.breakingChange ? 'high' : 'low',
+                changeContext: changeSummary,
+            }).catch(() => { });
+            return { broadcasted: true };
         }
     }
     catch {

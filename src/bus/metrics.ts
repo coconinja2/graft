@@ -41,6 +41,35 @@ export interface MetricsSummary {
   histograms: Record<string, HistogramSummary>
 }
 
+export interface GraphNode {
+  id: string
+  type: 'agent' | 'resource'
+  label: string
+}
+
+export interface GraphEdge {
+  from: string
+  to: string
+  type: 'holds' | 'waiting_for'
+  intent?: string
+  claimType?: string
+}
+
+export interface DependencyGraph {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  generatedAt: number
+}
+
+export interface AgentEfficiency {
+  agentId: string
+  claimsGranted: number
+  claimsDenied: number
+  blockRate: number
+  avgBlockedMs: number
+  efficiencyScore: number
+}
+
 const CLAIM_HOLD_BUCKETS = [100, 500, 1000, 5000, 10000, 30000, 60000, 120000]
 const SIGNAL_LATENCY_BUCKETS = [10, 50, 100, 500, 1000, 5000, 10000]
 const ACTIVE_WINDOW_MS = 5 * 60 * 1000
@@ -250,6 +279,69 @@ export class MetricsCollector {
       }))
       .sort((a, b) => b.denials - a.denials)
       .slice(0, limit)
+  }
+
+  computeGraph(): DependencyGraph {
+    const agentNodes = new Map<string, GraphNode>()
+    const resourceNodes = new Map<string, GraphNode>()
+    const edges: GraphEdge[] = []
+
+    for (const claim of this.registry.list()) {
+      if (!agentNodes.has(claim.agentId)) {
+        agentNodes.set(claim.agentId, { id: claim.agentId, type: 'agent', label: claim.agentId })
+      }
+      if (!resourceNodes.has(claim.resourceId)) {
+        resourceNodes.set(claim.resourceId, { id: claim.resourceId, type: 'resource', label: claim.resourceId })
+      }
+      edges.push({ from: claim.agentId, to: claim.resourceId, type: 'holds', intent: claim.intent, claimType: claim.claimType })
+    }
+
+    for (const conflict of this.audit.queryConflicts()) {
+      if (conflict.resolution !== 'pending') continue
+      const { agentId } = conflict.requestingAgent
+      if (!agentNodes.has(agentId)) {
+        agentNodes.set(agentId, { id: agentId, type: 'agent', label: agentId })
+      }
+      if (!resourceNodes.has(conflict.resourceId)) {
+        resourceNodes.set(conflict.resourceId, { id: conflict.resourceId, type: 'resource', label: conflict.resourceId })
+      }
+      edges.push({ from: agentId, to: conflict.resourceId, type: 'waiting_for', intent: conflict.requestingAgent.intent })
+    }
+
+    return {
+      nodes: [...agentNodes.values(), ...resourceNodes.values()],
+      edges,
+      generatedAt: Date.now(),
+    }
+  }
+
+  computeEfficiency(): AgentEfficiency[] {
+    const stats = new Map<string, { granted: number; denied: number; blockedMs: number[] }>()
+
+    for (const e of this.entries()) {
+      if (e.type !== 'claim_granted' && e.type !== 'claim_denied') continue
+      if (!stats.has(e.agentId)) stats.set(e.agentId, { granted: 0, denied: 0, blockedMs: [] })
+      const s = stats.get(e.agentId)!
+      if (e.type === 'claim_granted') s.granted++
+      else s.denied++
+    }
+
+    const now = Date.now()
+    for (const conflict of this.audit.queryConflicts()) {
+      const s = stats.get(conflict.requestingAgent.agentId)
+      if (!s) continue
+      s.blockedMs.push(conflict.resolvedAt ? conflict.resolvedAt - conflict.ts : now - conflict.ts)
+    }
+
+    return Array.from(stats.entries()).map(([agentId, s]) => {
+      const total = s.granted + s.denied
+      const blockRate = total > 0 ? Math.round((s.denied / total) * 1000) / 10 : 0
+      const avgBlockedMs = s.blockedMs.length > 0
+        ? Math.round(s.blockedMs.reduce((a, b) => a + b, 0) / s.blockedMs.length)
+        : 0
+      const efficiencyScore = Math.round((1 - blockRate / 100) * Math.max(0, 1 - avgBlockedMs / 60_000) * 100)
+      return { agentId, claimsGranted: s.granted, claimsDenied: s.denied, blockRate, avgBlockedMs, efficiencyScore }
+    }).sort((a, b) => b.efficiencyScore - a.efficiencyScore)
   }
 
   computeAgentRoster(): AgentRosterEntry[] {

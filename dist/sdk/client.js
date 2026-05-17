@@ -27,11 +27,22 @@ class GraftClient {
             intent: options.intent,
             ttl: options.ttl,
             claim_type: options.claimType,
+            line_start: options.lineStart,
+            line_end: options.lineEnd,
             wait: options.wait,
         });
     }
-    async release(resourceId) {
-        const res = await this.request('DELETE', `/claims/${encodeURIComponent(resourceId)}?agent_id=${encodeURIComponent(this.agentId)}`);
+    async release(resourceId, lineStart, lineEnd) {
+        const params = new URLSearchParams({ agent_id: this.agentId });
+        if (lineStart != null && lineEnd != null) {
+            params.set('line_start', String(lineStart));
+            params.set('line_end', String(lineEnd));
+        }
+        const res = await this.request('DELETE', `/claims/${encodeURIComponent(resourceId)}?${params}`);
+        return res.released;
+    }
+    async releaseById(claimId) {
+        const res = await this.request('DELETE', `/claim/${encodeURIComponent(claimId)}?agent_id=${encodeURIComponent(this.agentId)}`);
         return res.released;
     }
     // Blocks until resourceId is released or timeout_ms elapses (default 30s).
@@ -56,8 +67,12 @@ class GraftClient {
     async listClaims() {
         return this.request('GET', '/claims');
     }
-    async getClaim(resourceId) {
+    /** Returns all active claims on a resource (multiple when non-overlapping line ranges coexist). */
+    async getClaims(resourceId) {
         return this.request('GET', `/claims/${encodeURIComponent(resourceId)}`);
+    }
+    async getClaimById(claimId) {
+        return this.request('GET', `/claim/${encodeURIComponent(claimId)}`);
     }
     // ── Signals ─────────────────────────────────────────────────────────────
     async subscribe(types) {

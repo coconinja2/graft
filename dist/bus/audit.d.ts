@@ -1,4 +1,4 @@
-export type AuditEventType = 'claim_granted' | 'claim_denied' | 'claim_expired' | 'claim_released' | 'signal_published' | 'signal_delivered' | 'pool_acquired' | 'pool_released' | 'deadlock_detected' | 'deadlock_resolved';
+export type AuditEventType = 'claim_granted' | 'claim_denied' | 'claim_expired' | 'claim_released' | 'signal_published' | 'signal_delivered' | 'pool_acquired' | 'pool_released' | 'deadlock_detected' | 'deadlock_resolved' | 'starvation_detected' | 'healer_action';
 export interface AuditEntry {
     seq: number;
     ts: number;
@@ -8,6 +8,7 @@ export interface AuditEntry {
     signalId?: string;
     conflictId?: string;
     deadlockId?: string;
+    causedBySignalId?: string;
     detail: Record<string, unknown>;
 }
 export interface ConflictEntry {
@@ -51,9 +52,14 @@ export declare class AuditLog {
     private deadlocks;
     private seq;
     private maxEntries;
+    private appendListeners;
     readonly enabled: boolean;
     constructor(maxEntries?: number, enabled?: boolean);
     append(type: AuditEventType, agentId: string, fields?: Partial<Omit<AuditEntry, 'seq' | 'ts' | 'type' | 'agentId'>>): void;
+    /** Subscribe to all appended entries in real time. Returns an unsubscribe fn. */
+    onAppend(listener: (entry: AuditEntry) => void): () => void;
+    /** Return a snapshot of all entries (unfiltered, chronological order). */
+    getAll(): AuditEntry[];
     query(filter?: AuditFilter): AuditEntry[];
     getTimeline(agentId: string, since?: number): AuditEntry[];
     recordConflict(entry: Omit<ConflictEntry, 'conflictId' | 'ts' | 'resolution'>): ConflictEntry;

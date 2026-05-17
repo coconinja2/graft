@@ -9,10 +9,12 @@ import { SignalBus } from './signals'
 import { ResourcePool } from './pool'
 import { DeadlockDetector } from './deadlock'
 import { MetricsCollector } from './metrics'
+import { SelfHealer } from './healer'
 
 interface GraftConfig {
   bus: { port: number; backend: string; audit_max_entries: number; audit_enabled: boolean }
   agents: { heartbeat_interval: number; claim_ttl: number }
+  healer: { enabled: boolean; interval_ms: number; starvation_threshold_ms: number; auto_heal: boolean }
   pools: Record<string, { resources: string[] }>
   waves: Record<string, { agents: string[]; merge_gate: 'all_complete' | 'majority' | 'any' }>
 }
@@ -27,6 +29,7 @@ function loadConfig(configPath?: string): GraftConfig {
   const defaults: GraftConfig = {
     bus: { port: 7433, backend: 'memory', audit_max_entries: 10_000, audit_enabled: true },
     agents: { heartbeat_interval: 30, claim_ttl: 120 },
+    healer: { enabled: true, interval_ms: 15_000, starvation_threshold_ms: 30_000, auto_heal: true },
     pools: {},
     waves: {},
   }
@@ -44,6 +47,7 @@ function loadConfig(configPath?: string): GraftConfig {
         return {
           bus: { ...defaults.bus, ...(raw.bus ?? {}) },
           agents: { ...defaults.agents, ...(raw.agents ?? {}) },
+          healer: { ...defaults.healer, ...((raw as Partial<GraftConfig>).healer ?? {}) },
           pools: raw.pools ?? {},
           waves: raw.waves ?? {},
         }
@@ -80,6 +84,12 @@ export async function createServer(configPath?: string) {
 
   const startedAt = Date.now()
   const metrics = new MetricsCollector(audit, registry, signals, pool)
+  const healer = new SelfHealer(audit, registry, {
+    enabled: config.healer.enabled,
+    intervalMs: config.healer.interval_ms,
+    starvationThresholdMs: config.healer.starvation_threshold_ms,
+    autoHeal: config.healer.auto_heal,
+  })
 
   const app = Fastify({
     logger: {
@@ -387,11 +397,32 @@ export async function createServer(configPath?: string) {
     metrics.computeContention(req.query.limit ? Number(req.query.limit) : 20)
   )
 
+  // ── Dependency graph ──────────────────────────────────────────────────────
+
+  app.get('/graph', async () => metrics.computeGraph())
+
+  // ── Coordination efficiency ───────────────────────────────────────────────
+
+  app.get('/stats/efficiency', async () => metrics.computeEfficiency())
+
   // ── Agent roster ──────────────────────────────────────────────────────────
 
   app.get('/agents', async () => metrics.computeAgentRoster())
 
-  return { app, registry, signals, pool, deadlock, audit, metrics, config }
+  // ── Dashboard UI ──────────────────────────────────────────────────────────
+
+  app.get('/dashboard', async (_req, reply) => {
+    const candidates = [
+      path.join(__dirname, '..', 'dashboard', 'index.html'),
+      path.join(process.cwd(), 'src', 'dashboard', 'index.html'),
+    ]
+    const dashPath = candidates.find(p => fs.existsSync(p))
+    if (!dashPath) return reply.code(404).send('Dashboard not found — run npm run build first')
+    reply.header('Content-Type', 'text/html; charset=utf-8')
+    return fs.createReadStream(dashPath)
+  })
+
+  return { app, registry, signals, pool, deadlock, audit, metrics, healer, config }
 }
 
 function isWaveDone(wave: WaveState): boolean {
@@ -406,13 +437,16 @@ function isWaveDone(wave: WaveState): boolean {
 }
 
 export async function startServer(port?: number, configPath?: string): Promise<void> {
-  const { app, registry, deadlock, config } = await createServer(configPath)
+  const { app, registry, deadlock, healer, config } = await createServer(configPath)
   const listenPort = port ?? config.bus.port
 
   await app.listen({ port: listenPort, host: '127.0.0.1' })
   console.log(`Graft bus listening on http://127.0.0.1:${listenPort}`)
+  console.log(`Dashboard:    http://127.0.0.1:${listenPort}/dashboard`)
+  healer.start()
 
   const shutdown = () => {
+    healer.stop()
     registry.stop()
     deadlock.stop()
     app.close().then(() => process.exit(0))

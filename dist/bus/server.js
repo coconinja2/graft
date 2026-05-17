@@ -48,10 +48,13 @@ const registry_1 = require("./registry");
 const signals_1 = require("./signals");
 const pool_1 = require("./pool");
 const deadlock_1 = require("./deadlock");
+const metrics_1 = require("./metrics");
+const healer_1 = require("./healer");
 function loadConfig(configPath) {
     const defaults = {
         bus: { port: 7433, backend: 'memory', audit_max_entries: 10000, audit_enabled: true },
         agents: { heartbeat_interval: 30, claim_ttl: 120 },
+        healer: { enabled: true, interval_ms: 15000, starvation_threshold_ms: 30000, auto_heal: true },
         pools: {},
         waves: {},
     };
@@ -67,6 +70,7 @@ function loadConfig(configPath) {
                 return {
                     bus: { ...defaults.bus, ...(raw.bus ?? {}) },
                     agents: { ...defaults.agents, ...(raw.agents ?? {}) },
+                    healer: { ...defaults.healer, ...(raw.healer ?? {}) },
                     pools: raw.pools ?? {},
                     waves: raw.waves ?? {},
                 };
@@ -97,6 +101,13 @@ async function createServer(configPath) {
         });
     }
     const startedAt = Date.now();
+    const metrics = new metrics_1.MetricsCollector(audit, registry, signals, pool);
+    const healer = new healer_1.SelfHealer(audit, registry, {
+        enabled: config.healer.enabled,
+        intervalMs: config.healer.interval_ms,
+        starvationThresholdMs: config.healer.starvation_threshold_ms,
+        autoHeal: config.healer.auto_heal,
+    });
     const app = (0, fastify_1.default)({
         logger: {
             transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
@@ -112,38 +123,47 @@ async function createServer(configPath) {
     }));
     // ── Claims ───────────────────────────────────────────────────────────────
     app.post('/claims', async (req, reply) => {
-        const { resource_id, agent_id, intent, ttl, claim_type, wait } = req.body;
+        const { resource_id, agent_id, intent, ttl, claim_type, wait, line_start, line_end } = req.body;
         if (!resource_id || !agent_id || !intent) {
             return reply.code(400).send({ error: 'resource_id, agent_id, and intent are required' });
         }
-        const result = registry.claim({ resourceId: resource_id, agentId: agent_id, intent, ttl, claimType: claim_type });
-        if (!result.granted) {
-            if (wait) {
-                // Agent is blocking on this resource — record wait edge for deadlock detection
-                deadlock.recordWait(agent_id, resource_id, result.holder.agentId);
-            }
-            // Probe attempts (wait omitted or false) don't record a wait edge — the agent
-            // will move on, so the edge would be stale and could trigger false deadlocks
+        const lineRange = (line_start != null && line_end != null) ? { start: line_start, end: line_end } : undefined;
+        const result = registry.claim({ resourceId: resource_id, agentId: agent_id, intent, ttl, claimType: claim_type, lineRange });
+        if (!result.granted && wait) {
+            deadlock.recordWait(agent_id, resource_id, result.holder.agentId);
         }
         return result;
     });
     app.delete('/claims/:resource_id', async (req, reply) => {
         const { resource_id } = req.params;
+        const { agent_id, line_start, line_end } = req.query;
+        if (!agent_id)
+            return reply.code(400).send({ error: 'agent_id query param required' });
+        deadlock.clearWait(agent_id);
+        const lineRange = (line_start != null && line_end != null)
+            ? { start: Number(line_start), end: Number(line_end) }
+            : undefined;
+        const released = registry.release(decodeURIComponent(resource_id), agent_id, lineRange);
+        return { released };
+    });
+    // Release a specific claim by its UUID (more precise than by resource+agent)
+    app.delete('/claim/:claim_id', async (req, reply) => {
         const { agent_id } = req.query;
         if (!agent_id)
             return reply.code(400).send({ error: 'agent_id query param required' });
         deadlock.clearWait(agent_id);
-        const released = registry.release(decodeURIComponent(resource_id), agent_id);
+        const released = registry.releaseById(req.params.claim_id, agent_id);
         return { released };
     });
     app.get('/claims', async () => registry.list());
+    // Returns all active claims on a resource as an array (multiple non-overlapping line-range claims possible)
     app.get('/claims/:resource_id', async (req) => {
-        return registry.get(decodeURIComponent(req.params.resource_id)) ?? null;
+        return registry.get(decodeURIComponent(req.params.resource_id));
     });
     app.get('/claims/:resource_id/wait', async (req, reply) => {
         const resourceId = decodeURIComponent(req.params.resource_id);
         const timeoutMs = Math.min(Number(req.query.timeout_ms ?? 30000), 300000);
-        if (!registry.get(resourceId)) {
+        if (registry.get(resourceId).length === 0) {
             return { released: true, resourceId };
         }
         return new Promise((resolve) => {
@@ -284,7 +304,52 @@ async function createServer(configPath) {
         const sessionEnd = { ...entries[entries.length - 1], type: 'session_end' };
         return [sessionStart, ...entries, sessionEnd];
     });
-    return { app, registry, signals, pool, deadlock, audit, config };
+    // ── Metrics ───────────────────────────────────────────────────────────────
+    app.get('/metrics', async (req, reply) => {
+        if (req.query.format === 'json') {
+            return metrics.toJSON();
+        }
+        reply.header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+        return metrics.toPrometheus();
+    });
+    // ── Audit stream (SSE) ────────────────────────────────────────────────────
+    app.get('/audit/stream', (req, reply) => {
+        reply.hijack();
+        reply.raw.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+        });
+        reply.raw.write(':ok\n\n');
+        const unsubscribe = audit.onAppend((entry) => {
+            if (!reply.raw.destroyed) {
+                reply.raw.write(`data: ${JSON.stringify(entry)}\n\n`);
+            }
+        });
+        reply.raw.on('close', () => unsubscribe());
+    });
+    // ── Contention heatmap ────────────────────────────────────────────────────
+    app.get('/stats/contention', async (req) => metrics.computeContention(req.query.limit ? Number(req.query.limit) : 20));
+    // ── Dependency graph ──────────────────────────────────────────────────────
+    app.get('/graph', async () => metrics.computeGraph());
+    // ── Coordination efficiency ───────────────────────────────────────────────
+    app.get('/stats/efficiency', async () => metrics.computeEfficiency());
+    // ── Agent roster ──────────────────────────────────────────────────────────
+    app.get('/agents', async () => metrics.computeAgentRoster());
+    // ── Dashboard UI ──────────────────────────────────────────────────────────
+    app.get('/dashboard', async (_req, reply) => {
+        const candidates = [
+            path.join(__dirname, '..', 'dashboard', 'index.html'),
+            path.join(process.cwd(), 'src', 'dashboard', 'index.html'),
+        ];
+        const dashPath = candidates.find(p => fs.existsSync(p));
+        if (!dashPath)
+            return reply.code(404).send('Dashboard not found — run npm run build first');
+        reply.header('Content-Type', 'text/html; charset=utf-8');
+        return fs.createReadStream(dashPath);
+    });
+    return { app, registry, signals, pool, deadlock, audit, metrics, healer, config };
 }
 function isWaveDone(wave) {
     switch (wave.mergeGate) {
@@ -297,11 +362,14 @@ function isWaveDone(wave) {
     }
 }
 async function startServer(port, configPath) {
-    const { app, registry, deadlock, config } = await createServer(configPath);
+    const { app, registry, deadlock, healer, config } = await createServer(configPath);
     const listenPort = port ?? config.bus.port;
     await app.listen({ port: listenPort, host: '127.0.0.1' });
     console.log(`Graft bus listening on http://127.0.0.1:${listenPort}`);
+    console.log(`Dashboard:    http://127.0.0.1:${listenPort}/dashboard`);
+    healer.start();
     const shutdown = () => {
+        healer.stop();
         registry.stop();
         deadlock.stop();
         app.close().then(() => process.exit(0));

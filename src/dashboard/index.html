@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Graft — Parallel Agent Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --border: #21262d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --blue: #58a6ff;
+  --purple: #bc8cff;
+  --orange: #e3b341;
+  --font: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 12px; }
+
+/* ── Header ───────────────────────────────────────────────────── */
+#header {
+  display: flex; align-items: center; gap: 20px;
+  padding: 0 16px; height: 48px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 100;
+}
+.logo { font-size: 14px; font-weight: 700; letter-spacing: 3px; color: var(--green); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+.dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.offline { background: var(--red); }
+#uptime { color: var(--muted); font-size: 11px; min-width: 80px; }
+.hstat { display: flex; flex-direction: column; align-items: center; min-width: 48px; }
+.hstat .val { font-size: 15px; font-weight: 700; line-height: 1; }
+.hstat .lbl { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 1px; }
+.hstat.green .val { color: var(--green); }
+.hstat.red .val { color: var(--red); }
+.hstat.yellow .val { color: var(--yellow); }
+.hstat.purple .val { color: var(--purple); }
+.hstat.blue .val { color: var(--blue); }
+#last-update { margin-left: auto; color: var(--muted); font-size: 10px; }
+#heal-badge {
+  background: var(--purple); color: #000; padding: 1px 6px; border-radius: 10px;
+  font-size: 10px; font-weight: 700; display: none;
+}
+#heal-badge.visible { display: inline-block; }
+
+/* ── Grid ─────────────────────────────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: 260px 1fr 260px;
+  grid-template-rows: auto auto 48px auto;
+  grid-template-areas:
+    "roster  events      contention"
+    "graph   graph       efficiency"
+    "mbar    mbar        mbar"
+    "cflist  deadlocks   healer";
+  gap: 10px; padding: 10px;
+}
+
+/* ── Panel ────────────────────────────────────────────────────── */
+.panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  overflow: hidden; display: flex; flex-direction: column;
+}
+.panel-title {
+  padding: 8px 12px; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+  text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+}
+.panel-body { padding: 8px 12px; overflow-y: auto; flex: 1; }
+
+/* ── Areas ────────────────────────────────────────────────────── */
+#panel-roster    { grid-area: roster; }
+#panel-events    { grid-area: events; }
+#panel-contention{ grid-area: contention; }
+#panel-graph     { grid-area: graph; }
+#panel-efficiency{ grid-area: efficiency; }
+#panel-mbar      { grid-area: mbar; }
+#panel-conflicts { grid-area: cflist; }
+#panel-deadlocks { grid-area: deadlocks; }
+#panel-healer    { grid-area: healer; }
+
+/* ── Metrics bar ──────────────────────────────────────────────── */
+#panel-mbar {
+  flex-direction: row; align-items: center;
+  padding: 0 16px; gap: 28px;
+}
+#panel-mbar .panel-title { border: none; padding: 0; }
+.mstat { display: flex; flex-direction: column; align-items: center; }
+.mstat .mv { font-size: 18px; font-weight: 700; line-height: 1; }
+.mstat .ml { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.mstat.green .mv { color: var(--green); }
+.mstat.red .mv { color: var(--red); }
+.mstat.blue .mv { color: var(--blue); }
+.mstat.yellow .mv { color: var(--yellow); }
+.mstat.purple .mv { color: var(--purple); }
+.mdivider { width: 1px; height: 28px; background: var(--border); }
+
+/* ── Roster ───────────────────────────────────────────────────── */
+.agent-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+}
+.agent-row:last-child { border-bottom: none; }
+.agent-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; }
+.agent-dot.active { background: var(--green); box-shadow: 0 0 4px var(--green); }
+.agent-dot.idle { background: var(--muted); }
+.agent-info { flex: 1; min-width: 0; }
+.agent-id { font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-claims { color: var(--muted); font-size: 11px; margin-top: 1px; }
+.agent-claim-tag {
+  display: inline-block; background: rgba(63,185,80,.15);
+  border: 1px solid rgba(63,185,80,.3); color: var(--green);
+  padding: 0 4px; border-radius: 3px; font-size: 10px; margin: 1px 2px 0 0;
+  max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
+}
+.agent-stats { display: flex; gap: 8px; margin-top: 2px; font-size: 10px; color: var(--muted); }
+.agent-stats span { white-space: nowrap; }
+.agent-stats .denied { color: var(--red); }
+
+/* ── Live Events ──────────────────────────────────────────────── */
+.badge {
+  background: var(--border); color: var(--muted);
+  padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700;
+}
+#events-list {
+  height: 320px; overflow-y: auto; padding: 6px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.event-row {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 3px 0; border-bottom: 1px solid rgba(33,38,45,.6);
+  font-size: 11px; line-height: 1.4;
+}
+.event-icon { width: 14px; text-align: center; flex-shrink: 0; margin-top: 1px; }
+.event-body { flex: 1; min-width: 0; }
+.event-type { font-weight: 700; }
+.event-type.claim_granted  { color: var(--green); }
+.event-type.claim_denied   { color: var(--red); }
+.event-type.claim_expired  { color: var(--yellow); }
+.event-type.claim_released { color: var(--blue); }
+.event-type.signal_published { color: var(--purple); }
+.event-type.signal_delivered { color: var(--blue); }
+.event-type.deadlock_detected  { color: var(--red); }
+.event-type.deadlock_resolved  { color: var(--green); }
+.event-type.starvation_detected{ color: var(--orange); }
+.event-type.healer_action      { color: var(--purple); }
+.event-type.pool_acquired { color: var(--blue); }
+.event-type.pool_released { color: var(--muted); }
+.event-meta { color: var(--muted); font-size: 10px; }
+.event-ts { color: var(--muted); font-size: 10px; flex-shrink: 0; margin-left: auto; padding-left: 6px; }
+
+/* ── Contention ───────────────────────────────────────────────── */
+.contention-row { margin: 4px 0; }
+.contention-label {
+  display: flex; justify-content: space-between; margin-bottom: 2px;
+  color: var(--text); font-size: 11px;
+}
+.contention-label .res { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+.contention-label .count { color: var(--red); font-weight: 700; flex-shrink: 0; }
+.bar-track { height: 4px; background: var(--border); border-radius: 2px; }
+.bar-fill { height: 4px; border-radius: 2px; background: var(--red); transition: width .4s; }
+.contention-agents { color: var(--muted); font-size: 10px; margin-top: 1px; }
+
+/* ── Dependency Graph ─────────────────────────────────────────── */
+#graph-container { padding: 8px 12px; }
+#graph-svg { display: block; width: 100%; overflow: visible; }
+.graph-legend {
+  display: flex; gap: 16px; padding: 4px 12px 8px;
+  font-size: 10px; color: var(--muted);
+}
+.leg { display: flex; align-items: center; gap: 4px; }
+.leg-line { width: 20px; height: 2px; }
+.leg-line.holds { background: var(--green); }
+.leg-line.waiting { background: var(--red); border-top: 2px dashed var(--red); height: 0; }
+#graph-empty { padding: 20px; text-align: center; color: var(--muted); font-size: 11px; }
+
+/* ── Efficiency ───────────────────────────────────────────────── */
+.eff-row { padding: 5px 0; border-bottom: 1px solid var(--border); }
+.eff-row:last-child { border-bottom: none; }
+.eff-label { display: flex; justify-content: space-between; margin-bottom: 3px; }
+.eff-agent { font-weight: 700; color: var(--text); }
+.eff-score { font-size: 13px; font-weight: 700; }
+.eff-score.high { color: var(--green); }
+.eff-score.med  { color: var(--yellow); }
+.eff-score.low  { color: var(--red); }
+.eff-bar-track { height: 5px; background: var(--border); border-radius: 3px; }
+.eff-bar-fill  { height: 5px; border-radius: 3px; transition: width .4s; }
+.eff-details { display: flex; gap: 10px; margin-top: 2px; font-size: 10px; color: var(--muted); }
+
+/* ── Conflict / Deadlock / Healer tables ──────────────────────── */
+.table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.table th { color: var(--muted); font-size: 10px; text-align: left; padding: 4px 4px; border-bottom: 1px solid var(--border); }
+.table td { padding: 4px 4px; border-bottom: 1px solid rgba(33,38,45,.6); vertical-align: top; }
+.table tr:last-child td { border-bottom: none; }
+.tag {
+  display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px; font-weight: 700;
+}
+.tag.pending  { background: rgba(240,173,78,.15); color: var(--orange); }
+.tag.resolved { background: rgba(63,185,80,.15);  color: var(--green); }
+.tag.expired  { background: rgba(139,148,158,.15); color: var(--muted); }
+.empty-state { text-align: center; color: var(--muted); padding: 16px; font-size: 11px; }
+.healer-action { color: var(--purple); }
+.starvation { color: var(--orange); }
+.trunc { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Scrollbar ────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────── -->
+<div id="header">
+  <span class="logo">GRAFT</span>
+  <div class="dot" id="status-dot"></div>
+  <span id="uptime">connecting…</span>
+  <div style="width:1px;height:28px;background:var(--border)"></div>
+  <div class="hstat green"><span class="val" id="h-claims">0</span><span class="lbl">claims</span></div>
+  <div class="hstat red">  <span class="val" id="h-denials">0</span><span class="lbl">denied</span></div>
+  <div class="hstat blue"> <span class="val" id="h-signals">0</span><span class="lbl">signals</span></div>
+  <div class="hstat yellow"><span class="val" id="h-deadlocks">0</span><span class="lbl">deadlocks</span></div>
+  <div class="hstat purple"><span class="val" id="h-heals">0</span><span class="lbl">heals</span></div>
+  <span id="heal-badge">HEALER ACTIVE</span>
+  <span id="last-update"></span>
+</div>
+
+<!-- ── Grid ───────────────────────────────────────────────────── -->
+<div class="grid">
+
+  <!-- Agent Roster -->
+  <div class="panel" id="panel-roster">
+    <div class="panel-title">Agent Roster <span class="badge" id="roster-count">0</span></div>
+    <div class="panel-body" id="roster-body"><div class="empty-state">No agents yet</div></div>
+  </div>
+
+  <!-- Live Events -->
+  <div class="panel" id="panel-events">
+    <div class="panel-title">
+      Live Event Stream
+      <span class="badge" id="event-count">0</span>
+      <span id="sse-status" style="margin-left:auto;font-size:10px;color:var(--muted)">connecting…</span>
+    </div>
+    <div id="events-list"></div>
+  </div>
+
+  <!-- Contention Heatmap -->
+  <div class="panel" id="panel-contention">
+    <div class="panel-title">Contention Heatmap</div>
+    <div class="panel-body" id="contention-body"><div class="empty-state">No contention data</div></div>
+  </div>
+
+  <!-- Dependency Graph -->
+  <div class="panel" id="panel-graph">
+    <div class="panel-title">Dependency Graph — who holds what · who waits for what</div>
+    <div id="graph-container">
+      <div id="graph-empty">No active claims</div>
+      <svg id="graph-svg" style="display:none"></svg>
+    </div>
+    <div class="graph-legend">
+      <div class="leg"><div class="leg-line holds"></div>holds</div>
+      <div class="leg"><div class="leg-line waiting"></div>waiting for</div>
+    </div>
+  </div>
+
+  <!-- Efficiency -->
+  <div class="panel" id="panel-efficiency">
+    <div class="panel-title">Coordination Efficiency</div>
+    <div class="panel-body" id="efficiency-body"><div class="empty-state">No data yet</div></div>
+  </div>
+
+  <!-- Metrics bar -->
+  <div class="panel" id="panel-mbar">
+    <div class="panel-title" style="color:var(--muted)">METRICS</div>
+    <div class="mdivider"></div>
+    <div class="mstat green"><span class="mv" id="m-granted">0</span><span class="ml">granted</span></div>
+    <div class="mstat red">  <span class="mv" id="m-denied">0</span><span class="ml">denied</span></div>
+    <div class="mstat yellow"><span class="mv" id="m-expired">0</span><span class="ml">expired</span></div>
+    <div class="mstat blue"> <span class="mv" id="m-released">0</span><span class="ml">released</span></div>
+    <div class="mdivider"></div>
+    <div class="mstat purple"><span class="mv" id="m-pub">0</span><span class="ml">published</span></div>
+    <div class="mstat blue"> <span class="mv" id="m-del">0</span><span class="ml">delivered</span></div>
+    <div class="mdivider"></div>
+    <div class="mstat red">  <span class="mv" id="m-dl">0</span><span class="ml">deadlocks</span></div>
+    <div class="mstat purple"><span class="mv" id="m-heals">0</span><span class="ml">healer acts</span></div>
+    <div class="mdivider"></div>
+    <div class="mstat blue"> <span class="mv" id="m-p50">—</span><span class="ml">claim p50ms</span></div>
+    <div class="mstat yellow"><span class="mv" id="m-p95">—</span><span class="ml">claim p95ms</span></div>
+    <div class="mstat red">  <span class="mv" id="m-sig-lat">—</span><span class="ml">sig lat p50</span></div>
+  </div>
+
+  <!-- Conflicts -->
+  <div class="panel" id="panel-conflicts">
+    <div class="panel-title">Conflicts <span class="badge" id="cf-count">0</span></div>
+    <div class="panel-body" id="conflicts-body"><div class="empty-state">No conflicts</div></div>
+  </div>
+
+  <!-- Deadlocks -->
+  <div class="panel" id="panel-deadlocks">
+    <div class="panel-title">Deadlocks <span class="badge" id="dl-count">0</span></div>
+    <div class="panel-body" id="deadlocks-body"><div class="empty-state">No deadlocks</div></div>
+  </div>
+
+  <!-- Healer Log -->
+  <div class="panel" id="panel-healer">
+    <div class="panel-title">Healer Log <span class="badge" id="heal-count">0</span></div>
+    <div class="panel-body" id="healer-body"><div class="empty-state">Healer idle</div></div>
+  </div>
+
+</div>
+
+<script>
+const BASE = window.location.origin
+let eventCount = 0
+let sseConnected = false
+const MAX_EVENTS = 200
+
+// ── Helpers ────────────────────────────────────────────────────
+function ts(ms) {
+  return new Date(ms).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+function ago(ms) {
+  const s = Math.floor((Date.now() - ms) / 1000)
+  if (s < 60) return s + 's ago'
+  if (s < 3600) return Math.floor(s/60) + 'm ago'
+  return Math.floor(s/3600) + 'h ago'
+}
+function trunc(str, n = 28) {
+  if (!str) return '—'
+  if (str.length <= n) return str
+  const base = str.split('/').pop() || str
+  return base.length <= n ? '…/' + base : '…' + base.slice(-(n-1))
+}
+function $$(id) { return document.getElementById(id) }
+function setText(id, v) { const el = $$(id); if (el) el.textContent = v }
+
+// ── Event icons ─────────────────────────────────────────────────
+const ICONS = {
+  claim_granted: '✓', claim_denied: '✗', claim_expired: '⏱', claim_released: '↩',
+  signal_published: '↗', signal_delivered: '↘',
+  pool_acquired: '▶', pool_released: '◀',
+  deadlock_detected: '⚠', deadlock_resolved: '✓',
+  starvation_detected: '🔥', healer_action: '⚕',
+}
+
+// ── SSE: live event stream ──────────────────────────────────────
+function connectSSE() {
+  const es = new EventSource(BASE + '/audit/stream')
+  es.onopen = () => {
+    sseConnected = true
+    setText('sse-status', '● live')
+    $$('sse-status').style.color = 'var(--green)'
+  }
+  es.onerror = () => {
+    sseConnected = false
+    setText('sse-status', '○ reconnecting')
+    $$('sse-status').style.color = 'var(--red)'
+  }
+  es.onmessage = (e) => {
+    try { appendEvent(JSON.parse(e.data)) } catch {}
+  }
+}
+
+function appendEvent(entry) {
+  eventCount++
+  setText('event-count', eventCount)
+
+  const list = $$('events-list')
+  const row = document.createElement('div')
+  row.className = 'event-row'
+
+  const icon = ICONS[entry.type] || '·'
+  const meta = [entry.agentId, entry.resourceId].filter(Boolean).map(s => trunc(s, 22)).join(' → ')
+
+  row.innerHTML =
+    `<span class="event-icon">${icon}</span>` +
+    `<span class="event-body">` +
+      `<span class="event-type ${entry.type}">${entry.type}</span> ` +
+      `<span class="event-meta">${meta}</span>` +
+    `</span>` +
+    `<span class="event-ts">${ts(entry.ts)}</span>`
+
+  list.insertBefore(row, list.firstChild)
+  while (list.children.length > MAX_EVENTS) list.removeChild(list.lastChild)
+
+  // flash healer badge
+  if (entry.type === 'healer_action') {
+    const badge = $$('heal-badge')
+    badge.classList.add('visible')
+    setTimeout(() => badge.classList.remove('visible'), 3000)
+  }
+}
+
+// ── Poll: health ────────────────────────────────────────────────
+async function pollHealth() {
+  try {
+    const r = await fetch(BASE + '/health')
+    const d = await r.json()
+    $$('status-dot').className = 'dot online'
+    const u = d.uptime
+    const upStr = u < 60 ? u + 's' : u < 3600 ? Math.floor(u/60) + 'm ' + (u%60) + 's' : Math.floor(u/3600) + 'h'
+    setText('uptime', 'up ' + upStr)
+    setText('h-claims', d.claims)
+  } catch {
+    $$('status-dot').className = 'dot offline'
+    setText('uptime', 'offline')
+  }
+}
+
+// ── Poll: metrics ───────────────────────────────────────────────
+async function pollMetrics() {
+  try {
+    const d = (await (await fetch(BASE + '/metrics?format=json')).json())
+    const c = d.counters || {}
+    const h = d.histograms || {}
+    setText('h-denials',   c.claims_denied_total   ?? 0)
+    setText('h-signals',   c.signals_published_total ?? 0)
+    setText('h-deadlocks', c.deadlocks_detected_total ?? 0)
+    setText('m-granted',   c.claims_granted_total  ?? 0)
+    setText('m-denied',    c.claims_denied_total   ?? 0)
+    setText('m-expired',   c.claims_expired_total  ?? 0)
+    setText('m-released',  c.claims_released_total ?? 0)
+    setText('m-pub',       c.signals_published_total ?? 0)
+    setText('m-del',       c.signals_delivered_total ?? 0)
+    setText('m-dl',        c.deadlocks_detected_total ?? 0)
+    const chd = h.claim_hold_duration_ms
+    if (chd && chd.count > 0) {
+      setText('m-p50', chd.p50 + 'ms')
+      setText('m-p95', chd.p95 + 'ms')
+    }
+    const sld = h.signal_delivery_latency_ms
+    if (sld && sld.count > 0) setText('m-sig-lat', sld.p50 + 'ms')
+  } catch {}
+}
+
+// ── Poll: audit for healer counts ──────────────────────────────
+async function pollHealerCount() {
+  try {
+    const entries = await (await fetch(BASE + '/audit?type=healer_action&limit=200')).json()
+    const count = Array.isArray(entries) ? entries.length : 0
+    setText('h-heals', count)
+    setText('m-heals', count)
+    setText('heal-count', count)
+    renderHealerLog(entries)
+  } catch {}
+}
+
+// ── Poll: roster ────────────────────────────────────────────────
+async function pollRoster() {
+  try {
+    const agents = await (await fetch(BASE + '/agents')).json()
+    setText('roster-count', agents.length)
+    const body = $$('roster-body')
+    if (!agents.length) { body.innerHTML = '<div class="empty-state">No agents yet</div>'; return }
+    body.innerHTML = agents.map(a => {
+      const claimTags = (a.currentClaims || []).map(c =>
+        `<span class="agent-claim-tag" title="${c}">${trunc(c, 18)}</span>`).join('')
+      return `<div class="agent-row">
+        <div class="agent-dot ${a.active ? 'active' : 'idle'}"></div>
+        <div class="agent-info">
+          <div class="agent-id" title="${a.agentId}">${trunc(a.agentId, 22)}</div>
+          <div>${claimTags || '<span style="color:var(--muted);font-size:10px">no claims</span>'}</div>
+          <div class="agent-stats">
+            <span>✓ ${a.claimsGranted}</span>
+            ${a.claimsDenied ? `<span class="denied">✗ ${a.claimsDenied}</span>` : ''}
+            <span>↗ ${a.signalsPublished}</span>
+            ${a.pendingSignals ? `<span style="color:var(--purple)">⏳ ${a.pendingSignals} pending</span>` : ''}
+            <span style="margin-left:auto;color:var(--muted)">${ago(a.lastSeen)}</span>
+          </div>
+        </div>
+      </div>`
+    }).join('')
+  } catch {}
+}
+
+// ── Poll: contention ────────────────────────────────────────────
+async function pollContention() {
+  try {
+    const items = await (await fetch(BASE + '/stats/contention?limit=10')).json()
+    const body = $$('contention-body')
+    if (!items.length) { body.innerHTML = '<div class="empty-state">No contention data</div>'; return }
+    const max = items[0].denials || 1
+    body.innerHTML = items.map(item => {
+      const pct = Math.round(item.denials / max * 100)
+      const top = (item.topBlockingAgents || []).map(a => a.agentId).join(', ')
+      return `<div class="contention-row">
+        <div class="contention-label">
+          <span class="res" title="${item.resourceId}">${trunc(item.resourceId, 22)}</span>
+          <span class="count">${item.denials} denials</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        ${top ? `<div class="contention-agents">held by: ${trunc(top, 30)}</div>` : ''}
+      </div>`
+    }).join('')
+  } catch {}
+}
+
+// ── Poll: dependency graph ──────────────────────────────────────
+async function pollGraph() {
+  try {
+    const data = await (await fetch(BASE + '/graph')).json()
+    renderGraph(data)
+  } catch {}
+}
+
+function renderGraph(data) {
+  const agents    = (data.nodes || []).filter(n => n.type === 'agent')
+  const resources = (data.nodes || []).filter(n => n.type === 'resource')
+  const edges     = data.edges || []
+
+  const empty = $$('graph-empty')
+  const svg   = $$('graph-svg')
+
+  if (!agents.length && !resources.length) {
+    empty.style.display = 'block'; svg.style.display = 'none'; return
+  }
+  empty.style.display = 'none'; svg.style.display = 'block'
+
+  const W = svg.parentElement.clientWidth - 24
+  const rowH = 44
+  const rows = Math.max(agents.length, resources.length)
+  const H = Math.max(rows * rowH + 20, 80)
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`)
+  svg.style.height = H + 'px'
+  svg.innerHTML = ''
+
+  const NS = 'http://www.w3.org/2000/svg'
+  const agentX = 110
+  const resX = W - 110
+  const nodeW = 100
+  const nodeH = 22
+
+  // Position maps
+  const aPos = {}
+  agents.forEach((a, i) => { aPos[a.id] = { x: agentX, y: 20 + i * rowH } })
+  const rPos = {}
+  resources.forEach((r, i) => { rPos[r.id] = { x: resX, y: 20 + i * rowH } })
+
+  function mkEl(tag, attrs) {
+    const el = document.createElementNS(NS, tag)
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v)
+    return el
+  }
+
+  // Draw edges
+  for (const edge of edges) {
+    const from = aPos[edge.from]; const to = rPos[edge.to]
+    if (!from || !to) continue
+    const color = edge.type === 'holds' ? '#3fb950' : '#f85149'
+    const x1 = from.x + nodeW/2 + 4, y1 = from.y + nodeH/2
+    const x2 = to.x - nodeW/2 - 4,   y2 = to.y + nodeH/2
+    const cx = (x1 + x2) / 2
+    const path = mkEl('path', {
+      d: `M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`,
+      stroke: color, 'stroke-width': '1.5', fill: 'none',
+      'stroke-dasharray': edge.type === 'waiting_for' ? '4 3' : 'none',
+      opacity: '0.8',
+    })
+    svg.appendChild(path)
+    // Arrow
+    const arrow = mkEl('polygon', {
+      points: `${x2},${y2} ${x2-7},${y2-3} ${x2-7},${y2+3}`,
+      fill: color, opacity: '0.8',
+    })
+    svg.appendChild(arrow)
+  }
+
+  // Draw agent nodes (rounded rect + label)
+  for (const [id, pos] of Object.entries(aPos)) {
+    const g = mkEl('g', {})
+    const r = mkEl('rect', {
+      x: pos.x - nodeW/2, y: pos.y, width: nodeW, height: nodeH,
+      rx: '4', fill: '#21262d', stroke: '#3fb950', 'stroke-width': '1',
+    })
+    const label = id.split('-').slice(-2).join('-') || id
+    const t = mkEl('text', {
+      x: pos.x, y: pos.y + nodeH/2 + 4,
+      'text-anchor': 'middle', fill: '#3fb950',
+      'font-family': 'monospace', 'font-size': '10',
+    })
+    t.textContent = trunc(label, 12)
+    g.appendChild(r); g.appendChild(t)
+    const title = mkEl('title', {}); title.textContent = id
+    g.appendChild(title); svg.appendChild(g)
+  }
+
+  // Draw resource nodes
+  for (const [id, pos] of Object.entries(rPos)) {
+    const g = mkEl('g', {})
+    // Is anyone waiting for this resource?
+    const hasWaiter = edges.some(e => e.to === id && e.type === 'waiting_for')
+    const color = hasWaiter ? '#f85149' : '#58a6ff'
+    const r = mkEl('rect', {
+      x: pos.x - nodeW/2, y: pos.y, width: nodeW, height: nodeH,
+      rx: '4', fill: '#21262d', stroke: color, 'stroke-width': '1',
+    })
+    const t = mkEl('text', {
+      x: pos.x, y: pos.y + nodeH/2 + 4,
+      'text-anchor': 'middle', fill: color,
+      'font-family': 'monospace', 'font-size': '10',
+    })
+    t.textContent = trunc(id, 14)
+    g.appendChild(r); g.appendChild(t)
+    const title = mkEl('title', {}); title.textContent = id
+    g.appendChild(title); svg.appendChild(g)
+  }
+}
+
+// ── Poll: efficiency ────────────────────────────────────────────
+async function pollEfficiency() {
+  try {
+    const items = await (await fetch(BASE + '/stats/efficiency')).json()
+    const body = $$('efficiency-body')
+    if (!items.length) { body.innerHTML = '<div class="empty-state">No data yet</div>'; return }
+    body.innerHTML = items.map(a => {
+      const score = a.efficiencyScore
+      const cls = score >= 80 ? 'high' : score >= 50 ? 'med' : 'low'
+      const barColor = score >= 80 ? 'var(--green)' : score >= 50 ? 'var(--yellow)' : 'var(--red)'
+      return `<div class="eff-row">
+        <div class="eff-label">
+          <span class="eff-agent" title="${a.agentId}">${trunc(a.agentId, 20)}</span>
+          <span class="eff-score ${cls}">${score}%</span>
+        </div>
+        <div class="eff-bar-track">
+          <div class="eff-bar-fill" style="width:${score}%;background:${barColor}"></div>
+        </div>
+        <div class="eff-details">
+          <span>✓ ${a.claimsGranted} granted</span>
+          ${a.claimsDenied ? `<span style="color:var(--red)">✗ ${a.claimsDenied} denied</span>` : ''}
+          ${a.avgBlockedMs ? `<span>⏱ ${a.avgBlockedMs}ms avg blocked</span>` : ''}
+        </div>
+      </div>`
+    }).join('')
+  } catch {}
+}
+
+// ── Poll: conflicts ─────────────────────────────────────────────
+async function pollConflicts() {
+  try {
+    const items = await (await fetch(BASE + '/conflicts')).json()
+    setText('cf-count', items.length)
+    const body = $$('conflicts-body')
+    if (!items.length) { body.innerHTML = '<div class="empty-state">No conflicts</div>'; return }
+    body.innerHTML = `<table class="table">
+      <tr><th>Resource</th><th>Agents</th><th>Status</th><th>Age</th></tr>
+      ${items.slice(0, 20).map(c => `<tr>
+        <td class="trunc" title="${c.resourceId}">${trunc(c.resourceId, 18)}</td>
+        <td style="font-size:10px">
+          <span style="color:var(--red)">${trunc(c.requestingAgent.agentId, 10)}</span>
+          <span style="color:var(--muted)"> → </span>
+          <span style="color:var(--blue)">${trunc(c.holdingAgent.agentId, 10)}</span>
+        </td>
+        <td><span class="tag ${c.resolution}">${c.resolution}</span></td>
+        <td style="color:var(--muted)">${ago(c.ts)}</td>
+      </tr>`).join('')}
+    </table>`
+  } catch {}
+}
+
+// ── Poll: deadlocks ─────────────────────────────────────────────
+async function pollDeadlocks() {
+  try {
+    const items = await (await fetch(BASE + '/deadlocks')).json()
+    setText('dl-count', items.length)
+    const body = $$('deadlocks-body')
+    if (!items.length) { body.innerHTML = '<div class="empty-state" style="color:var(--green)">✓ No deadlocks</div>'; return }
+    body.innerHTML = `<table class="table">
+      <tr><th>Cycle</th><th>Status</th><th>When</th></tr>
+      ${items.slice(0, 10).map(d => `<tr>
+        <td style="font-size:10px">${(d.cycle||[]).map(c => trunc(c.agentId, 8)).join(' → ')}</td>
+        <td><span class="tag ${d.resolution === 'pending' ? 'pending' : 'resolved'}">${d.resolution}</span></td>
+        <td style="color:var(--muted)">${ago(d.ts)}</td>
+      </tr>`).join('')}
+    </table>`
+  } catch {}
+}
+
+// ── Healer log ──────────────────────────────────────────────────
+function renderHealerLog(entries) {
+  const body = $$('healer-body')
+  const actions = (entries || []).filter(e => e.type === 'healer_action' || e.type === 'starvation_detected')
+  if (!actions.length) { body.innerHTML = '<div class="empty-state">Healer idle</div>'; return }
+  body.innerHTML = `<table class="table">
+    <tr><th>Type</th><th>Resource</th><th>Detail</th><th>When</th></tr>
+    ${actions.slice(0, 20).map(e => {
+      const cls = e.type === 'healer_action' ? 'healer-action' : 'starvation'
+      const detail = e.type === 'healer_action'
+        ? `freed from ${trunc(String(e.detail.holdingAgent || ''), 12)}`
+        : `held by ${trunc(String(e.detail.holdingAgent || ''), 12)}`
+      return `<tr>
+        <td class="${cls}" style="white-space:nowrap">${e.type === 'healer_action' ? '⚕ healed' : '🔥 starved'}</td>
+        <td class="trunc" title="${e.resourceId}">${trunc(e.resourceId || '', 16)}</td>
+        <td style="font-size:10px;color:var(--muted)">${detail}</td>
+        <td style="color:var(--muted)">${ago(e.ts)}</td>
+      </tr>`
+    }).join('')}
+  </table>`
+}
+
+// ── Update timestamp ────────────────────────────────────────────
+function updateTimestamp() {
+  setText('last-update', new Date().toLocaleTimeString())
+}
+
+// ── Poll all ────────────────────────────────────────────────────
+async function pollAll() {
+  await Promise.allSettled([
+    pollHealth(), pollMetrics(), pollRoster(),
+    pollContention(), pollGraph(), pollEfficiency(),
+    pollConflicts(), pollDeadlocks(), pollHealerCount(),
+  ])
+  updateTimestamp()
+}
+
+// ── Boot ────────────────────────────────────────────────────────
+connectSSE()
+pollAll()
+setInterval(pollAll, 3000)
+</script>
+</body>
+</html>
